@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+feedparser
+supabase
+python-dotenv
+pydantic>=2
