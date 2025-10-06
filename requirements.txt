@@ -1,6 +1,4 @@
-fastapi
-uvicorn[standard]
-feedparser
+flask
+flask_cors
 supabase
-python-dotenv
-pydantic>=2
+python-dateutil

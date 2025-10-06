@@ -1,25 +1,25 @@
 # -*- coding: utf-8 -*-
 """
-独立运行版 · KPI 概览接口（自动取数据库中最新数据日期）
+KPI 概览接口 Blueprint（自动取数据库中最新数据日期）
 -----------------------------------------------------
 用法：
   export SUPABASE_URL="https://xxxxx.supabase.co"
   export SUPABASE_SERVICE_KEY="your_service_key"
-  python data-cards.py
 
 访问：
-  http://127.0.0.1:5002/api/dashboard/data-cards
-  http://127.0.0.1:5002/api/dashboard/data-cards/trend
+  /api/dashboard/data-cards
+  /api/dashboard/data-cards/trend
 """
 
-from flask import Flask, jsonify, request
+from flask import Blueprint, jsonify, request, make_response
 from supabase import create_client, Client
 from datetime import datetime, timedelta, date as date_cls
 from typing import Dict, Tuple, List, Optional
 import os
+import json
 
 # ===================== 初始化 =====================
-app = Flask(__name__)
+data_cards_bp = Blueprint('data_cards', __name__)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s")
@@ -151,7 +151,7 @@ def _get_latest_date(table: str, time_field: str) -> Optional[datetime]:
 
 
 # ===================== KPI 主接口 =====================
-@app.route("/api/dashboard/data-cards", methods=["GET"])
+@data_cards_bp.route("/data-cards", methods=["GET"])
 def get_data_cards_latest():
     """
     自动定位数据库最新日期的 KPI 数据卡
@@ -161,11 +161,17 @@ def get_data_cards_latest():
     latest_paper = _get_latest_date("00_papers", "published_at")
     candidates = [d for d in [latest_news, latest_comp, latest_paper] if d]
     if not candidates:
-        return jsonify({
+        response_data = {
             "code": 200,
             "message": "no data found",
             "data": {"cards": [], "date": None, "period": "day"}
-        })
+        }
+        response = make_response(
+            json.dumps(response_data, ensure_ascii=False, indent=2)
+        )
+        response.status_code = 200
+        response.mimetype = 'application/json; charset=utf-8'
+        return response
     anchor_dt = max(candidates)
     anchor = anchor_dt.date()
 
@@ -247,11 +253,17 @@ def get_data_cards_latest():
         },
     ]
 
-    return jsonify({
+    response_data = {
         "code": 200,
         "message": "success",
         "data": {"date": anchor.isoformat(), "period": period, "cards": cards}
-    })
+    }
+    response = make_response(
+        json.dumps(response_data, ensure_ascii=False, indent=2)
+    )
+    response.status_code = 200
+    response.mimetype = 'application/json; charset=utf-8'
+    return response
 
 # ===================== 趋势接口 =====================
 def _daily_points(start: datetime, end: datetime, counter_fn) -> List[Dict]:
@@ -272,7 +284,7 @@ def _daily_points(start: datetime, end: datetime, counter_fn) -> List[Dict]:
         pts[0]["change"] = 0.0
     return pts
 
-@app.route("/api/dashboard/data-cards/trend", methods=["GET"])
+@data_cards_bp.route("/data-cards/trend", methods=["GET"])
 def get_data_cards_trend():
     """趋势数据接口（自动取最近一周数据）"""
     card_id = int(request.args.get("cardId", 1))
@@ -304,15 +316,24 @@ def get_data_cards_trend():
             )
         pts = _daily_points(start, end, _count_alert)
     else:
-        return jsonify({"code": 400, "message": "invalid cardId", "data": {}})
+        error_data = {"code": 400, "message": "invalid cardId", "data": {}}
+        response = make_response(
+            json.dumps(error_data, ensure_ascii=False, indent=2)
+        )
+        response.status_code = 400
+        response.mimetype = 'application/json; charset=utf-8'
+        return response
 
-    return jsonify({
+    response_data = {
         "code": 200,
         "message": "success",
         "data": {"cardId": card_id, "period": period, "trendData": pts}
-    })
+    }
+    response = make_response(
+        json.dumps(response_data, ensure_ascii=False, indent=2)
+    )
+    response.status_code = 200
+    response.mimetype = 'application/json; charset=utf-8'
+    return response
 
-# ===================== 启动 =====================
-if __name__ == "__main__":
-    print("✅ 启动 KPI 服务：http://127.0.0.1:5002/api/dashboard/data-cards")
-    app.run(host="0.0.0.0", port=5002, debug=True)
+# 移除独立运行代码，现在作为Blueprint使用

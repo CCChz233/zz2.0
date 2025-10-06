@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Flask 后端：新闻 API（基于视图 news_feed_view，且只返回有摘要的记录）
+Flask 后端：新闻 API Blueprint（基于视图 news_feed_view，且只返回有摘要的记录）
 依赖:
     pip install flask supabase
 环境变量（如未用环境变量，可直接按下方常量写死）:
@@ -9,10 +9,11 @@ Flask 后端：新闻 API（基于视图 news_feed_view，且只返回有摘要�
 """
 
 import os
+import json
 from datetime import datetime
 from typing import Optional
 
-from flask import Flask, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 from supabase import create_client
 
 # ====== 配置 ======
@@ -21,7 +22,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6Ik
 VIEW_NAME = os.getenv("NEWS_FEED_VIEW", "news_feed_ready_view")  # 你创建的视图名
 
 # ====== 初始化 ======
-app = Flask(__name__)
+news_bp = Blueprint('news', __name__)
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ====== 工具函数 ======
@@ -94,7 +95,7 @@ def map_category(news_type: Optional[str]) -> str:
     return mapping.get(news_type, news_type)
 
 # ====== 列表接口 ======
-@app.route("/api/dashboard/news", methods=["GET"])
+@news_bp.route("/news", methods=["GET"])
 def get_news_list():
     page = int(request.args.get("page", 1))
     page_size = int(request.args.get("pageSize", 20))
@@ -157,7 +158,7 @@ def get_news_list():
             "createdAt": created_at_iso,
         })
 
-    return jsonify({
+    response_data = {
         "code": 200,
         "message": "success",
         "data": {
@@ -166,10 +167,18 @@ def get_news_list():
             "pageSize": page_size,
             "news": news_list
         }
-    })
+    }
+    
+    # 使用自定义JSON编码器确保中文字符正确显示
+    response = make_response(
+        json.dumps(response_data, ensure_ascii=False, indent=2)
+    )
+    response.status_code = 200
+    response.mimetype = 'application/json; charset=utf-8'
+    return response
 
 # ====== 详情接口 ======
-@app.route("/api/dashboard/news/<string:news_id>", methods=["GET"])
+@news_bp.route("/news/<string:news_id>", methods=["GET"])
 def get_news_detail(news_id: str):
     # 只查有摘要的记录
     res = (
@@ -183,7 +192,13 @@ def get_news_detail(news_id: str):
     )
     r = res.data
     if not r:
-        return jsonify({"code": 404, "message": "not found", "data": {}})
+        error_data = {"code": 404, "message": "not found", "data": {}}
+        response = make_response(
+            json.dumps(error_data, ensure_ascii=False, indent=2)
+        )
+        response.status_code = 404
+        response.mimetype = 'application/json; charset=utf-8'
+        return response
 
     date_str, time_str = parse_time_maybe(r.get("publish_time"))
 
@@ -214,15 +229,15 @@ def get_news_detail(news_id: str):
         "updatedAt": to_iso_safe(r.get("updated_at")),
     }
 
-    return jsonify({"code": 200, "message": "success", "data": detail})
+    response_data = {"code": 200, "message": "success", "data": detail}
+    
+    # 使用自定义JSON编码器确保中文字符正确显示
+    response = make_response(
+        json.dumps(response_data, ensure_ascii=False, indent=2)
+    )
+    response.status_code = 200
+    response.mimetype = 'application/json; charset=utf-8'
+    return response
 
 
-# ====== 健康检查 ======
-@app.route("/healthz", methods=["GET"])
-def healthz():
-    return jsonify({"ok": True})
-
-
-if __name__ == "__main__":
-    # 本地调试
-    app.run(host="0.0.0.0", port=8000, debug=True)
+# 移除独立运行代码，现在作为Blueprint使用

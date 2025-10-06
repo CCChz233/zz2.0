@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-每日AI简报 API（独立运行）
+每日AI简报 API Blueprint
 依赖: pip install flask supabase python-dateutil
 
 环境变量（如未配置，可按默认写死）:
@@ -12,10 +12,11 @@
 """
 
 import os
+import json
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
-from flask import Flask, request, jsonify
+from flask import Blueprint, request, jsonify, make_response
 from dateutil import parser as dateparser
 from supabase import create_client
 
@@ -29,7 +30,7 @@ COMP_TABLE = "competitors"
 CURRENT_VIEW = {"view": "management"}
 
 # ==== 初始化 ====
-app = Flask(__name__)
+daily_report_bp = Blueprint('daily_report', __name__)
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ==== 工具 ====
@@ -137,7 +138,7 @@ def map_category_by_view(view: str) -> str:
     return mapping.get(view, "竞品动态")
 
 # ==== API ====
-@app.route("/api/dashboard/daily-report", methods=["GET"])
+@daily_report_bp.route("/daily-report", methods=["GET"])
 def get_daily_report():
     """
     入参: date(可选), view(可选: management/market/sales/product)
@@ -148,7 +149,7 @@ def get_daily_report():
     anchor = pick_anchor_date(date_param)
 
     if not anchor:
-        return jsonify({
+        response_data = {
             "code": 200,
             "message": "success",
             "data": {
@@ -156,12 +157,18 @@ def get_daily_report():
                 "view": view,
                 "highlights": []
             }
-        })
+        }
+        response = make_response(
+            json.dumps(response_data, ensure_ascii=False, indent=2)
+        )
+        response.status_code = 200
+        response.mimetype = 'application/json; charset=utf-8'
+        return response
 
     # 拉取当天（或最近）的分析结果
     analysis_rows = load_analysis_for_date(anchor)
     if not analysis_rows:
-        return jsonify({
+        response_data = {
             "code": 200,
             "message": "success",
             "data": {
@@ -169,7 +176,13 @@ def get_daily_report():
                 "view": view,
                 "highlights": []
             }
-        })
+        }
+        response = make_response(
+            json.dumps(response_data, ensure_ascii=False, indent=2)
+        )
+        response.status_code = 200
+        response.mimetype = 'application/json; charset=utf-8'
+        return response
 
     # 取涉及的竞品，做一次性映射
     comp_ids = list({r.get("competitor_id") for r in analysis_rows if r.get("competitor_id")})
@@ -235,7 +248,7 @@ def get_daily_report():
             "createdAt": created_iso
         })
 
-    return jsonify({
+    response_data = {
         "code": 200,
         "message": "success",
         "data": {
@@ -243,9 +256,15 @@ def get_daily_report():
             "view": view,
             "highlights": highlights
         }
-    })
+    }
+    response = make_response(
+        json.dumps(response_data, ensure_ascii=False, indent=2)
+    )
+    response.status_code = 200
+    response.mimetype = 'application/json; charset=utf-8'
+    return response
 
-@app.route("/api/dashboard/daily-report/view", methods=["PUT"])
+@daily_report_bp.route("/daily-report/view", methods=["PUT"])
 def update_daily_report_view():
     """
     仅更新后端当前默认视角（内存）；如需跨实例共享，可写入配置表
@@ -253,16 +272,26 @@ def update_daily_report_view():
     body = request.get_json(silent=True) or {}
     v = (body.get("view") or "").strip()
     if v not in ("management", "market", "sales", "product"):
-        return jsonify({"code": 400, "message": "invalid view", "data": {}})
+        error_data = {"code": 400, "message": "invalid view", "data": {}}
+        response = make_response(
+            json.dumps(error_data, ensure_ascii=False, indent=2)
+        )
+        response.status_code = 400
+        response.mimetype = 'application/json; charset=utf-8'
+        return response
+    
     CURRENT_VIEW["view"] = v
     now_iso = to_iso_utc(datetime.now(timezone.utc))
-    return jsonify({
+    response_data = {
         "code": 200,
         "message": "success",
         "data": {"view": v, "updatedAt": now_iso}
-    })
+    }
+    response = make_response(
+        json.dumps(response_data, ensure_ascii=False, indent=2)
+    )
+    response.status_code = 200
+    response.mimetype = 'application/json; charset=utf-8'
+    return response
 
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5003"))
-    print(f"✅ 启动 每日AI简报 服务：http://127.0.0.1:{port}/api/dashboard/daily-report")
-    app.run(host="0.0.0.0", port=port, debug=True)
+# 移除独立运行代码，现在作为Blueprint使用
