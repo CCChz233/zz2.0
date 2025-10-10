@@ -154,70 +154,87 @@ def _get_latest_date(table: str, time_field: str) -> Optional[datetime]:
 @data_cards_bp.route("/data-cards", methods=["GET"])
 def get_data_cards_latest():
     """
-    自动定位数据库最新日期的 KPI 数据卡
+    KPI 数据卡（最小改动版）：
+    - 每张卡片使用自己的最新日期作为锚点来统计当期与环比
+    - 返回中的 data.date 仍为三表最大时间的那一天（保持兼容）
     """
-    latest_news = _get_latest_date(VIEW_NAME, "publish_time")
-    latest_comp = _get_latest_date("competitors", "last_analyzed")
-    latest_paper = _get_latest_date("00_papers", "published_at")
-    candidates = [d for d in [latest_news, latest_comp, latest_paper] if d]
+    period = request.args.get("period", "day")
+
+    # === 各自的锚点时间（可能为 None） ===
+    anchor_news_dt = _get_latest_date(VIEW_NAME, "publish_time")
+    anchor_comp_dt = _get_latest_date("competitors", "last_analyzed")
+    anchor_paper_dt = _get_latest_date("00_papers", "published_at")
+
+    # 总体 date 仍然返回三表最大时间（兼容原前端）
+    candidates = [d for d in [anchor_news_dt, anchor_comp_dt, anchor_paper_dt] if d]
     if not candidates:
         response_data = {
             "code": 200,
             "message": "no data found",
-            "data": {"cards": [], "date": None, "period": "day"}
+            "data": {"cards": [], "date": None, "period": period}
         }
-        response = make_response(
-            json.dumps(response_data, ensure_ascii=False, indent=2)
-        )
+        response = make_response(json.dumps(response_data, ensure_ascii=False, indent=2))
         response.status_code = 200
         response.mimetype = 'application/json; charset=utf-8'
         return response
-    anchor_dt = max(candidates)
-    anchor = anchor_dt.date()
+    anchor_overall = max(candidates).date()
 
-    period = request.args.get("period", "day")
-    cur_start, cur_end = _period_window(anchor, period)
-    prev_start, prev_end = _previous_window(cur_start, cur_end)
+    # === 不同卡片的时间窗口（按各自锚点） ===
+    def _win(dt_opt):
+        if not dt_opt:
+            return None, None, None, None
+        cur_s, cur_e = _period_window(dt_opt.date(), period)
+        prev_s, prev_e = _previous_window(cur_s, cur_e)
+        return cur_s, cur_e, prev_s, prev_e
 
-    # 数据统计
-    news_curr = _count_news_between(cur_start, cur_end)
-    news_prev = _count_news_between(prev_start, prev_end)
-    papers_curr = _count_papers_between(cur_start, cur_end)
-    papers_prev = _count_papers_between(prev_start, prev_end)
-    comp_curr = _count_competitors_updated_between(cur_start, cur_end)
-    comp_prev = _count_competitors_updated_between(prev_start, prev_end)
+    news_cur_s, news_cur_e, news_prev_s, news_prev_e = _win(anchor_news_dt)
+    comp_cur_s, comp_cur_e, comp_prev_s, comp_prev_e = _win(anchor_comp_dt)
+    paper_cur_s, paper_cur_e, paper_prev_s, paper_prev_e = _win(anchor_paper_dt)
 
-    # 预警监控数
-    alert_kw = ["原子力", "强磁场", "探针台", "克尔"]
-    res = (
-        sb.table("competitors")
-        .select("id,product")
-        .gte("last_analyzed", cur_start.isoformat())
-        .lte("last_analyzed", cur_end.isoformat())
-        .execute()
-    )
-    alerts_curr = sum(
-        1 for r in (res.data or [])
-        if any(k in (r.get("product") or "") for k in alert_kw)
-    )
-    res_prev = (
-        sb.table("competitors")
-        .select("id,product")
-        .gte("last_analyzed", prev_start.isoformat())
-        .lte("last_analyzed", prev_end.isoformat())
-        .execute()
-    )
-    alerts_prev = sum(
-        1 for r in (res_prev.data or [])
-        if any(k in (r.get("product") or "") for k in alert_kw)
-    )
+    # === 计数：为空窗口则返回 0 ===
+    news_curr = _count_news_between(news_cur_s, news_cur_e) if news_cur_s else 0
+    news_prev = _count_news_between(news_prev_s, news_prev_e) if news_prev_s else 0
 
-    # 组装结果
+    comp_curr = _count_competitors_updated_between(comp_cur_s, comp_cur_e) if comp_cur_s else 0
+    comp_prev = _count_competitors_updated_between(comp_prev_s, comp_prev_e) if comp_prev_s else 0
+
+    papers_curr = _count_papers_between(paper_cur_s, paper_cur_e) if paper_cur_s else 0
+    papers_prev = _count_papers_between(paper_prev_s, paper_prev_e) if paper_prev_s else 0
+
+    # 预警监控：跟随 competitors 的锚点与窗口
+    if comp_cur_s:
+        res = (
+            sb.table("competitors")
+            .select("id,product")
+            .gte("last_analyzed", comp_cur_s.isoformat())
+            .lte("last_analyzed", comp_cur_e.isoformat())
+            .execute()
+        )
+        alert_kw = ["原子力", "强磁场", "探针台", "克尔"]
+        alerts_curr = sum(1 for r in (res.data or []) if any(k in (r.get("product") or "") for k in alert_kw))
+    else:
+        alerts_curr = 0
+
+    if comp_prev_s:
+        res_prev = (
+            sb.table("competitors")
+            .select("id,product")
+            .gte("last_analyzed", comp_prev_s.isoformat())
+            .lte("last_analyzed", comp_prev_e.isoformat())
+            .execute()
+        )
+        alert_kw = ["原子力", "强磁场", "探针台", "克尔"]
+        alerts_prev = sum(1 for r in (res_prev.data or []) if any(k in (r.get("product") or "") for k in alert_kw))
+    else:
+        alerts_prev = 0
+
+    # === 环比趋势（带限幅） ===
     t1, txt1, icon1, _ = _calc_trend(news_curr, news_prev)
     t2, txt2, icon2, _ = _calc_trend(comp_curr, comp_prev)
     t3, txt3, icon3, _ = _calc_trend(papers_curr, papers_prev)
     t4, txt4, icon4, _ = _calc_trend(alerts_curr, alerts_prev)
 
+    # === 组装结果（保持原结构不变） ===
     cards = [
         {
             "id": 1,
@@ -256,11 +273,9 @@ def get_data_cards_latest():
     response_data = {
         "code": 200,
         "message": "success",
-        "data": {"date": anchor.isoformat(), "period": period, "cards": cards}
+        "data": {"date": anchor_overall.isoformat(), "period": period, "cards": cards}
     }
-    response = make_response(
-        json.dumps(response_data, ensure_ascii=False, indent=2)
-    )
+    response = make_response(json.dumps(response_data, ensure_ascii=False, indent=2))
     response.status_code = 200
     response.mimetype = 'application/json; charset=utf-8'
     return response

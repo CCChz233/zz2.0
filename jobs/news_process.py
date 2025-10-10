@@ -1,304 +1,480 @@
 # -*- coding: utf-8 -*-
 """
-Flask 后端：今日全球要闻 API（基于 policy_feed_view_latest 视图）
-依赖:
-    pip install flask supabase python-dotenv
+News Cleaning + Qwen Summarization + Supabase Upsert (完整修正版)
 
-环境变量(推荐):
+依赖:
+    pip install supabase requests python-dotenv
+
+环境变量:
     SUPABASE_URL=...
     SUPABASE_SERVICE_KEY=...
-
-也可直接在下方常量里硬编码（不推荐）。
+    QWEN_API_KEY=...
+    QWEN_MODEL=qwen-turbo
 """
 
 import os
-from urllib.parse import urlparse
+import re
+import json
+import time
+import random
+import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Dict, Any, List
 
-from flask import Flask, request, jsonify
+import requests
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# ====================== 配置 ======================
+# ---------------- 环境变量 ----------------
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL") or "https://YOUR-PROJECT.supabase.co"
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY") or "YOUR-SERVICE-KEY"
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-turbo")
 
-# 供前端调用的视图（建议为“只含已摘要数据”的视图）
-# 如果你使用的是“全量视图”，保留代码里对 short_summary 的过滤即可。
-VIEW_NAME = "policy_feed_view_latest"
+PIPELINE_MODE = os.getenv("PIPELINE_MODE", "multi").lower()  # multi | single
+RAW_NEWS_TABLE = os.getenv("RAW_NEWS_TABLE", "00_news")      # 原始新闻表
 
-# 类别映射：后端统一用英文枚举，前端可自行映射中文展示
-# 你的原始 news_type 建议也是这几个英文之一
-VALID_CATEGORIES = {"all", "policy", "industry", "competitor", "tech"}
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))  # 每批文章数量
 
-app = Flask(__name__)
+if not all([SUPABASE_URL, SUPABASE_KEY, QWEN_API_KEY]):
+    raise SystemExit("请设置 SUPABASE_URL / SUPABASE_SERVICE_KEY / QWEN_API_KEY")
 
-# Supabase 客户端
+# ---------------- Logging ----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
+logger = logging.getLogger("qwen-news-pipeline")
+
+logger.info(f"Using RAW_NEWS_TABLE = {RAW_NEWS_TABLE} | PIPELINE_MODE = {PIPELINE_MODE}")
+
+# ---------------- Supabase ----------------
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ---------------- 清洗函数 ----------------
+IMG_MD_PATTERN = re.compile(r'!\[[^\]]*\]\([^)]+\)')
+NOISE_RE = re.compile(
+    r'header|footer|logo|search|nav|二维码|微信公众号|移动客户端|/images?/|'
+    r'\.(png|jpg|jpeg|svg)\b|^相关人物$|^下一步$|欢迎访问|统一身份认证|尊敬的用户',
+    re.IGNORECASE
+)
 
-# ====================== 工具函数 ======================
-def parse_iso_datetime(s: Optional[str]) -> Optional[datetime]:
-    """兼容多种 ISO 输入，返回 aware datetime（UTC 假设）"""
-    if not s:
-        return None
-    try:
-        # 处理 'Z' 结尾
-        if s.endswith("Z"):
-            s = s.replace("Z", "+00:00")
-        # 处理微秒位数不为6的情况
-        if "." in s:
-            date_part, frac = s.split(".", 1)
-            # frac 里可能还有时区，例如 .123+00:00
-            tz_part = ""
-            if "+" in frac:
-                frac, tz_part = frac.split("+", 1)
-                tz_part = "+" + tz_part
-            elif "-" in frac[1:]:
-                # 负号作为时区，例如 .123-08:00
-                idx = frac[1:].find("-") + 1
-                frac, tz_part = frac[:idx], frac[idx:]
-            # 标准化为6位微秒
-            frac = (frac + "000000")[:6]
-            s = f"{date_part}.{frac}{tz_part}"
-        dt = datetime.fromisoformat(s)
-        # 若为 naive，则视为 UTC
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except Exception:
-        return None
+def clean_text(raw: str) -> str:
+    """去掉图片/页眉页脚/二维码/登录公告等噪声"""
+    if not raw:
+        return ""
+    lines = [l.strip() for l in raw.splitlines()]
+    kept = []
+    for l in lines:
+        l2 = IMG_MD_PATTERN.sub("", l).strip()
+        if not l2 or NOISE_RE.search(l2):
+            continue
+        if len(re.sub(r'[\W_]+', "", l2)) <= 1:
+            continue
+        kept.append(l2)
+    txt = "\n".join(kept)
+    txt = re.sub(r'\n{3,}', '\n\n', txt).strip()
+    txt = re.sub(r'(?m)^(0?\d{1,2})[．\.\s　]+', r'\1. ', txt)
+    return txt
 
+# ---------------- Prompt ----------------
+PROMPT_TPL = """
+你是新闻编辑。以下是清洗后的新闻正文，请输出严格 JSON（UTF-8，无注释）：
+字段：
+- title: 新闻标题
+- short_summary: ≤120字摘要
+- long_summary: 200~300字摘要
+- bullets: 3-6条要点，每条≤40字
+- entities: {{ "org":[], "person":[], "location":[], "date":[] }}
+- ai_suggestion: ≤80字的行动建议（企业/政策视角，可操作且不夸张）
+- ai_suggestion_full: 150~300字的完整建议（包含背景、影响、建议动作）
 
-def to_date_time_strings(publish_time: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
-    """返回 (YYYY-MM-DD, HH:MM)"""
-    dt = parse_iso_datetime(publish_time)
-    if not dt:
-        return None, None
-    return dt.strftime("%Y-%m-%d"), dt.strftime("%H:%M")
+要求：
+- 只使用给定文本里的信息，不能虚构
+- 保留关键数字与时间
+- 忽略噪声
+- 严格输出 JSON（不要任何额外说明或 Markdown 代码块）
 
+标题提示：{title_hint}
+正文：
+\"\"\"{body}\"\"\"
+""".strip()
 
-def to_created_at_z(s: Optional[str]) -> Optional[str]:
-    """将任意 ISO 输入转成标准 Z 结尾字符串"""
-    dt = parse_iso_datetime(s)
-    if not dt:
-        return None
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def estimate_read_time(text: Optional[str]) -> str:
-    """按汉字数估算阅读时长；200字≈1分钟，至少1分钟"""
-    n = len(text or "")
-    minutes = max(1, n // 200)
-    return f"{minutes}分钟"
-
-
-def source_human_readable(source_type: Optional[str], link: Optional[str]) -> Optional[str]:
-    """优先返回 source_type；否则用 link 的域名"""
-    if source_type:
-        return source_type
-    if link:
-        try:
-            netloc = urlparse(link).netloc
-            return netloc or None
-        except Exception:
-            return None
-    return None
-
-
-def non_null_action_suggestion(val: Optional[str]) -> str:
-    """actionSuggestion 保底为非 null"""
-    return val or ""
-
-
-def build_tags_from_summary_json(summary_json: Optional[Dict[str, Any]]) -> List[str]:
-    """从 summary_json.entities 聚合 tags（去重、最少返回 []）"""
-    if not isinstance(summary_json, dict):
-        return []
-    entities = summary_json.get("entities") or {}
-    if not isinstance(entities, dict):
-        return []
-    tags: List[str] = []
-    for k in ("org", "person", "location", "date"):
-        v = entities.get(k)
-        if isinstance(v, list):
-            tags.extend([str(x) for x in v if x])
-    # 去重且保序
-    seen = set()
-    uniq = []
-    for t in tags:
-        if t not in seen:
-            seen.add(t)
-            uniq.append(t)
-    return uniq[:12]  # 控制数量
-
-
-# ====================== 查询构造 ======================
-def base_query():
-    """基础查询：按 publish_time desc, id desc"""
-    return (
-        sb.table(VIEW_NAME)
-        .select("*")
-        .order("publish_time", desc=True)
-        .order("id", desc=True)
-    )
-
-
-def apply_filters(q, category: str, keyword: str, date_str: Optional[str]):
-    """
-    结合视图字段：
-      - id
-      - title
-      - publish_time
-      - source_url
-      - source_type
-      - short_summary
-      - long_summary
-      - clean_text
-      - summary_json
-      - news_type
-      - created_at / updated_at (若视图里带出)
-    """
-    # 过滤：只返回有摘要（如果你的视图已经只含有摘要，可注释下一行）
-    q = q.not_.is_("short_summary", "null")
-
-    if category and category != "all":
-        q = q.eq("news_type", category)
-
-    if keyword:
-        # 标题 & 摘要模糊
-        q = q.or_(
-            f"title.ilike.%{keyword}%,short_summary.ilike.%{keyword}%"
-        )
-
-    if date_str:
-        # 同一天（按日期字符串匹配）
-        q = q.gte("publish_time", f"{date_str}T00:00:00") \
-             .lte("publish_time", f"{date_str}T23:59:59.999999")
-
-    return q
-
-
-def count_total(category: str, keyword: str, date_str: Optional[str]) -> int:
-    """获取过滤后的总条数（只统计有摘要的）"""
-    q = sb.table(VIEW_NAME).select("id", count="exact")
-    q = q.not_.is_("short_summary", "null")
-    if category and category != "all":
-        q = q.eq("news_type", category)
-    if keyword:
-        q = q.or_(f"title.ilike.%{keyword}%,short_summary.ilike.%{keyword}%")
-    if date_str:
-        q = q.gte("publish_time", f"{date_str}T00:00:00") \
-             .lte("publish_time", f"{date_str}T23:59:59.999999")
-    res = q.execute()
-    # supabase-py 返回 count 属性
-    return int(getattr(res, "count", 0) or 0)
-
-
-# ====================== 路由 ======================
-@app.route("/api/dashboard/news", methods=["GET"])
-def get_news_list():
-    # ---- 查询参数 ----
-    page = max(1, int(request.args.get("page", 1)))
-    page_size = min(100, max(1, int(request.args.get("pageSize", 20))))
-    category = request.args.get("category", "all").lower().strip()
-    keyword = (request.args.get("keyword") or "").strip()
-    date_str = (request.args.get("date") or "").strip() or None
-
-    if category not in VALID_CATEGORIES:
-        category = "all"
-
-    # ---- 统计总数（只含有摘要的记录）----
-    total = count_total(category, keyword, date_str)
-
-    # ---- 分页范围 ----
-    start = (page - 1) * page_size
-    end = start + page_size - 1
-
-    # ---- 查询列表数据 ----
-    q = base_query()
-    q = apply_filters(q, category, keyword, date_str)
-    res = q.range(start, end).execute()
-    rows = res.data or []
-
-    # ---- 组装返回 ----
-    news_list: List[Dict[str, Any]] = []
-    for r in rows:
-        date_only, hhmm = to_date_time_strings(r.get("publish_time"))
-        created_at_z = to_created_at_z(r.get("created_at") or r.get("updated_at"))
-
-        news_list.append({
-            "id": r.get("id"),
-            "category": (r.get("news_type") or "all").lower(),
-            "title": r.get("title"),
-            "source": source_human_readable(r.get("source_type"), r.get("source_url")),
-            "time": hhmm,
-            "publishTime": date_only,
-            "readTime": estimate_read_time(r.get("clean_text") or r.get("long_summary") or r.get("short_summary")),
-            "link": r.get("source_url"),
-            "summary": r.get("short_summary") or "",
-            "actionSuggestion": non_null_action_suggestion(None),  # 先给空；可后续接 LLM 生成
-            "relatedNews": [],                                     # 预留：相似文章召回
-            "createdAt": created_at_z,
-        })
-
-    return jsonify({
-        "code": 200,
-        "message": "success",
-        "data": {
-            "total": total,
-            "page": page,
-            "pageSize": page_size,
-            "news": news_list
-        }
-    })
-
-
-@app.route("/api/dashboard/news/<string:news_id>", methods=["GET"])
-def get_news_detail(news_id: str):
-    # 详情只查一条
-    res = (
-        sb.table(VIEW_NAME)
-        .select("*")
-        .eq("id", news_id)
-        .not_.is_("short_summary", "null")  # 仅允许已摘要
-        .single()
+# ---------------- Supabase IO ----------------
+def fetch_articles_batch(offset: int, limit: int) -> List[Dict[str, Any]]:
+    res = sb.table(RAW_NEWS_TABLE) \
+        .select("id,title,content,publish_time,source_url,source_type") \
+        .order("id", desc=True) \
+        .range(offset, offset + limit - 1) \
         .execute()
-    )
-    r = res.data
-    if not r:
-        return jsonify({"code": 404, "message": "not found", "data": {}})
+    return res.data or []
 
-    date_only, hhmm = to_date_time_strings(r.get("publish_time"))
-    created_at_z = to_created_at_z(r.get("created_at"))
-    updated_at_z = to_created_at_z(r.get("updated_at"))
-    tags = build_tags_from_summary_json(r.get("summary_json"))
+def fetch_summaries_map(ids: List[str]) -> Dict[str, Dict[str, Any]]:
+    if not ids:
+        return {}
+    # Supabase: where in (...)
+    res = sb.table("news_summaries") \
+        .select("news_id,short_summary,long_summary,ai_suggestion,ai_suggestion_full") \
+        .in_("news_id", ids) \
+        .execute()
+    m = {}
+    for r in (res.data or []):
+        m[str(r["news_id"])] = r
+    return m
 
-    detail = {
-        "id": r.get("id"),
-        "category": (r.get("news_type") or "all").lower(),
-        "title": r.get("title"),
-        "source": source_human_readable(r.get("source_type"), r.get("source_url")),
-        "time": hhmm,
-        "publishTime": date_only,
-        "readTime": estimate_read_time(r.get("clean_text") or r.get("long_summary") or r.get("short_summary")),
-        "link": r.get("source_url"),
-        "content": r.get("clean_text") or "",           # 详情展示清洗后的正文
-        "summary": r.get("long_summary") or r.get("short_summary") or "",
-        "actionSuggestion": non_null_action_suggestion(None),
-        "relatedNews": [],
-        "tags": tags,
-        "createdAt": created_at_z,
-        "updatedAt": updated_at_z,
+# ---------------- Qwen API ----------------
+DASHSCOPE_BASES = [
+    "https://dashscope.aliyuncs.com",        # 国内
+    "https://dashscope-intl.aliyuncs.com",   # 国际
+]
+
+def safe_truncate(s: str, max_len: int) -> str:
+    return s[:max_len] if len(s) > max_len else s
+
+def _strip_fence_to_json(s: str) -> dict:
+    s = s.strip()
+    if s.startswith("```"):
+        s = s.strip("`").replace("json", "", 1).strip()
+    i, j = s.find("{"), s.rfind("}")
+    if 0 <= i < j:
+        s = s[i:j+1]
+    return json.loads(s)
+
+def qwen_chat_json(prompt: str, timeout: int = 60, max_retries: int = 6) -> Dict[str, Any]:
+    headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
+
+    def make_payload_messages():
+        return {
+            "model": QWEN_MODEL,
+            "input": {
+                "messages": [
+                    {"role": "system", "content": "你是严谨的新闻编辑，严格输出 JSON。"},
+                    {"role": "user", "content": prompt}
+                ]
+            },
+            "parameters": {"result_format": "json", "temperature": 0.2, "top_p": 0.8}
+        }
+
+    def make_payload_plain():
+        return {
+            "model": QWEN_MODEL,
+            "input": prompt,
+            "parameters": {"temperature": 0.2, "top_p": 0.8}
+        }
+
+    attempt, use_plain_input = 0, False
+    bases_to_try = DASHSCOPE_BASES[:]
+
+    while True:
+        attempt += 1
+        base = bases_to_try[0]
+        url = f"{base}/api/v1/services/aigc/text-generation/generation"
+        payload = make_payload_plain() if use_plain_input else make_payload_messages()
+
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                out = data.get("output") or {}
+                text = out.get("text") or data.get("output_text")
+                if not text and "choices" in out:
+                    text = out["choices"][0]["message"]["content"]
+                if not text:
+                    raise ValueError("Qwen 返回空")
+                return _strip_fence_to_json(text)
+
+            if resp.status_code == 400 and ("url error" in resp.text or "InvalidParameter" in resp.text):
+                if len(bases_to_try) > 1:
+                    bases_to_try.pop(0)
+                    logger.warning("切换域名重试...")
+                    continue
+                if not use_plain_input:
+                    use_plain_input = True
+                    logger.warning("降级为 input=纯文本")
+                    continue
+
+            if resp.status_code in (429, 500, 502, 503, 504):
+                wait = min(2 ** (attempt - 1), 20) * (1 + random.random())
+                logger.warning(f"限流/服务端错误 {resp.status_code}，睡 {wait:.1f}s")
+                time.sleep(wait)
+                continue
+
+            resp.raise_for_status()
+
+        except Exception as e:
+            if attempt < max_retries:
+                wait = min(2 ** (attempt - 1), 10)
+                logger.warning(f"网络异常，第{attempt}次重试，睡 {wait:.1f}s | {e}")
+                time.sleep(wait)
+                continue
+            raise
+
+# ---------------- Key Normalizer ----------------
+def _normalize_summary_keys(d: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    兼容大小写/驼峰/别名，确保包含 ai_suggestion / ai_suggestion_full 两键。
+    不做“凭空生成”，仅做键名映射与基本类型兜底。
+    """
+    if not isinstance(d, dict):
+        return {"title":"", "short_summary":"", "long_summary":"", "bullets":[], "entities":{}, "ai_suggestion":"", "ai_suggestion_full":""}
+
+    def pick(keys, default=""):
+        for k in keys:
+            if k in d:
+                return d.get(k)
+            # 大小写兼容
+            for kk in list(d.keys()):
+                if kk.lower() == k.lower():
+                    return d.get(kk)
+        return default
+
+    title = pick(["title"], "")
+    short_summary = pick(["short_summary", "shortSummary"], "")
+    long_summary = pick(["long_summary", "longSummary"], "")
+    bullets = pick(["bullets", "points", "key_points", "keyPoints"], [])
+    entities = pick(["entities"], {})
+    ai_suggestion = pick(["ai_suggestion", "aiSuggestion", "action_suggestion", "actionSuggestion", "recommendation"], "")
+    ai_suggestion_full = pick(["ai_suggestion_full", "aiSuggestionFull", "action_suggestion_full", "actionSuggestionFull", "recommendations"], "")
+
+    # 类型兜底
+    if not isinstance(bullets, list):
+        try:
+            if isinstance(bullets, str):
+                bullets = json.loads(bullets)
+            else:
+                bullets = []
+        except Exception:
+            bullets = []
+    if not isinstance(entities, dict):
+        try:
+            if isinstance(entities, str):
+                entities = json.loads(entities)
+            else:
+                entities = {}
+        except Exception:
+            entities = {}
+
+    out = {
+        "title": title or "",
+        "short_summary": short_summary or "",
+        "long_summary": long_summary or "",
+        "bullets": bullets or [],
+        "entities": entities or {},
+        "ai_suggestion": (ai_suggestion or "").strip(),
+        "ai_suggestion_full": (ai_suggestion_full or "").strip(),
     }
+    return out
 
-    return jsonify({"code": 200, "message": "success", "data": detail})
+# ---------------- Multi-Agent Prompts ----------------
+SUMMARY_PROMPT = """
+你是新闻编辑。基于提供正文，输出严格JSON（UTF-8，无注释），所有键必须出现：
+{{
+  "title": "",
+  "short_summary": "",       // ≤120字
+  "long_summary": "",        // 200~300字
+  "bullets": ["", "", ""]    // 3~6条，每条≤40字
+}}
+要求：
+- 仅依据原文，不得虚构；保留关键数字与时间；无说明文字、无Markdown。
+- 若缺信息请置为 "" 或 []。
+正文：
+\"\"\"{clean_text}\"\"\"
+""".strip()
 
+ENTITIES_PROMPT = """
+你是信息抽取器。抽取实体并输出严格JSON（UTF-8，无注释），所有键必须出现：
+{{ "org":[], "person":[], "location":[], "date":[] }}
+要求：
+- 去重；保持原文表述；无解释；没有就空数组；仅依据给定文本。
+文本：
+\"\"\"{clean_text}\"\"\
+""".strip()
 
-# ====================== 入口 ======================
+ADVISOR_PROMPT = """
+你是行业分析顾问。基于“摘要+要点+实体”，输出建议为严格JSON（UTF-8，无注释）：
+{{
+  "ai_suggestion": "",        // ≤80字，具体、可执行、不夸张
+  "ai_suggestion_full": ""    // 150~300字：按“背景→影响→建议动作(1-3条)”组织
+}}
+要求：
+- 仅使用给定信息，不得增加外部事实；避免空话。
+- 两个字段都必须出现；若确无可建议，返回空字符串。
+输入：
+【短摘要】{short_summary}
+【要点】{bullets_json}
+【实体】{entities_json}
+【可选长摘要】{long_summary}
+""".strip()
+
+def call_summarizer(clean_text_: str, title_hint: str = "") -> Dict[str, Any]:
+    prompt = SUMMARY_PROMPT.format(clean_text=clean_text_)
+    res = qwen_chat_json(prompt)
+    return _normalize_summary_keys(res)
+
+def call_entities(clean_text_: str) -> Dict[str, Any]:
+    prompt = ENTITIES_PROMPT.format(clean_text=clean_text_)
+    try:
+        res = qwen_chat_json(prompt)
+    except Exception:
+        return {"org": [], "person": [], "location": [], "date": []}
+    if not isinstance(res, dict):
+        return {"org": [], "person": [], "location": [], "date": []}
+    # 规整
+    out = {"org": [], "person": [], "location": [], "date": []}
+    for key in out.keys():
+        v = res.get(key) or res.get(key.lower()) or res.get(key.upper())
+        if isinstance(v, list):
+            out[key] = v
+        elif isinstance(v, str):
+            try:
+                vv = json.loads(v)
+                if isinstance(vv, list): out[key] = vv
+            except Exception:
+                pass
+    return out
+
+def call_advisor(short_summary: str, long_summary: str, bullets: List[str], entities: Dict[str, Any]) -> Dict[str, Any]:
+    prompt = ADVISOR_PROMPT.format(
+        short_summary=short_summary or "",
+        long_summary=long_summary or "",
+        bullets_json=json.dumps(bullets or [], ensure_ascii=False),
+        entities_json=json.dumps(entities or {}, ensure_ascii=False),
+    )
+    res = qwen_chat_json(prompt)
+    norm = _normalize_summary_keys(res)
+    # 兜底：若短建议为空而长建议有内容，用前80字填充短建议
+    if not norm.get("ai_suggestion") and norm.get("ai_suggestion_full"):
+        norm["ai_suggestion"] = (norm["ai_suggestion_full"][:80]).strip()
+    return norm
+
+# ---------------- Summarize ----------------
+def summarize_with_qwen(clean_text_: str, title_hint: str = "") -> Dict[str, Any]:
+    """single 模式：一次性产生全部字段（保留回滚能力）"""
+    body = safe_truncate(clean_text_, 6000)
+    prompt = PROMPT_TPL.format(title_hint=title_hint or "无", body=body)
+    raw = qwen_chat_json(prompt)
+    return _normalize_summary_keys(raw)
+
+def upsert_summary(row: Dict[str, Any], clean_txt: str, summary: Dict[str, Any]) -> None:
+    short_summary = (summary.get("short_summary") or "").strip()
+    long_summary = (summary.get("long_summary") or "").strip()
+    ai_suggestion = (summary.get("ai_suggestion") or "").strip()
+    ai_suggestion_full = (summary.get("ai_suggestion_full") or "").strip()
+    if (not ai_suggestion) and ai_suggestion_full:
+        ai_suggestion = ai_suggestion_full[:80]
+    payload = {
+        "news_id": row["id"],
+        "clean_text": clean_txt,
+        "short_summary": short_summary[:120],
+        "long_summary": long_summary[:1200],
+        "ai_suggestion": ai_suggestion[:200],
+        "ai_suggestion_full": ai_suggestion_full[:2000],
+        "summary_json": summary,
+        "model": QWEN_MODEL,
+        "status": "ok",
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    sb.table("news_summaries").upsert(payload, on_conflict="news_id").execute()
+
+from concurrent.futures import ThreadPoolExecutor
+
+def run_pipeline_multi(max_batches: int = 10, batch_size: int = BATCH_SIZE, sleep_sec: float = 0.5, only_missing: bool = True):
+    processed = 0
+    for b in range(max_batches):
+        rows = fetch_articles_batch(offset=b * batch_size, limit=batch_size)
+        if not rows:
+            logger.info("没有更多数据，处理完成。")
+            break
+        # 仅处理缺建议的（可配置）
+        if only_missing:
+            ids = [r["id"] for r in rows]
+            smap = fetch_summaries_map(ids)
+            def need(row):
+                s = smap.get(str(row["id"]))
+                if not s:
+                    return True
+                return not (s.get("ai_suggestion") and s.get("ai_suggestion_full"))
+            rows = [r for r in rows if need(r)]
+            if not rows:
+                logger.info("本批全部已有建议，跳过。")
+                continue
+        for r in rows:
+            news_id = r["id"]
+            title_hint = r.get("title") or ""
+            raw = r.get("content") or ""
+            try:
+                clean = clean_text(raw)
+                if not clean:
+                    logger.info(f"[SKIP] id={news_id} 清洗后为空")
+                    continue
+                with ThreadPoolExecutor(max_workers=2) as ex:
+                    fut_sum = ex.submit(call_summarizer, clean, title_hint)
+                    fut_ent = ex.submit(call_entities, clean)
+                    summ = fut_sum.result()
+                    ents = fut_ent.result()
+                adv = call_advisor(
+                    short_summary=summ.get("short_summary",""),
+                    long_summary=summ.get("long_summary",""),
+                    bullets=summ.get("bullets",[]),
+                    entities=ents or {},
+                )
+                # 合并：以总结器为基，补入实体与建议
+                summary = {
+                    "title": summ.get("title",""),
+                    "short_summary": summ.get("short_summary",""),
+                    "long_summary": summ.get("long_summary",""),
+                    "bullets": summ.get("bullets",[]),
+                    "entities": ents or {},
+                    "ai_suggestion": adv.get("ai_suggestion",""),
+                    "ai_suggestion_full": adv.get("ai_suggestion_full",""),
+                }
+                upsert_summary(r, clean, summary)
+                processed += 1
+                logger.info(f"✅(multi) 已处理 {news_id} | {summary.get('short_summary','')[:30]}...")
+            except Exception as e:
+                logger.error(f"[ERROR] id={news_id}: {e}", exc_info=True)
+                continue
+            time.sleep(sleep_sec)
+    logger.info(f"(multi) 管线结束，总处理条数：{processed}")
+
+# ---------------- Pipeline ----------------
+def run_pipeline(max_batches: int = 10, batch_size: int = BATCH_SIZE, sleep_sec: float = 0.5, only_missing: bool = False):
+    if PIPELINE_MODE == "multi":
+        return run_pipeline_multi(max_batches=max_batches, batch_size=batch_size, sleep_sec=sleep_sec, only_missing=True)
+    processed = 0
+    for b in range(max_batches):
+        rows = fetch_articles_batch(offset=b * batch_size, limit=batch_size)
+        if not rows:
+            logger.info("没有更多数据，处理完成。")
+            break
+        for r in rows:
+            news_id = r["id"]
+            title_hint = r.get("title") or ""
+            raw = r.get("content") or ""
+            try:
+                clean = clean_text(raw)
+                if not clean:
+                    logger.info(f"[SKIP] id={news_id} 清洗后为空")
+                    continue
+                summary = summarize_with_qwen(clean, title_hint)
+                upsert_summary(r, clean, summary)
+                processed += 1
+                logger.info(f"✅(single) 已处理 {news_id} | {summary.get('short_summary','')[:30]}...")
+            except Exception as e:
+                logger.error(f"[ERROR] id={news_id}: {e}", exc_info=True)
+                continue
+            time.sleep(sleep_sec)
+    logger.info(f"(single) 管线结束，总处理条数：{processed}")
+
 if __name__ == "__main__":
-    # 本地调试：http://127.0.0.1:8000/api/dashboard/news
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=["single","multi"], default=PIPELINE_MODE)
+    parser.add_argument("--batches", type=int, default=10)
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    parser.add_argument("--sleep", type=float, default=0.5)
+    parser.add_argument("--only-missing", action="store_true", help="仅处理缺少建议的新闻（multi模式内置为True）")
+    args = parser.parse_args()
+    logger.info(f"Qwen 模型: {QWEN_MODEL} | 批大小: {args.batch_size} | 模式: {args.mode} | 表: {RAW_NEWS_TABLE}")
+    # 覆盖一次运行模式
+    PIPELINE_MODE = args.mode
+    run_pipeline(max_batches=args.batches, batch_size=args.batch_size, sleep_sec=args.sleep, only_missing=args.only_missing)

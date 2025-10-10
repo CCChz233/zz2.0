@@ -64,10 +64,17 @@ def index():
     }
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Unified API Service")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Port to run the Flask server")
+    args = parser.parse_args()
+    port = args.port
+
     print(f"✅ 启动统一API服务：http://127.0.0.1:{port}")
     print(f"📊 每日AI简报: http://127.0.0.1:{port}/api/dashboard/daily-report")
     print(f"📈 KPI概览: http://127.0.0.1:{port}/api/dashboard/data-cards")
     print(f"📰 新闻服务: http://127.0.0.1:{port}/api/dashboard/news")
     print(f"👤 用户认证: http://127.0.0.1:{port}/api/user/login")
+
     app.run(host="0.0.0.0", port=port, debug=True)

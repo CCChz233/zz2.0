@@ -103,6 +103,15 @@ def get_news_list():
     keyword = request.args.get("keyword", "").strip()
     date = request.args.get("date")
 
+    # 视角/筛选增强（可选）
+    view = request.args.get("view", "global")
+    only_ai = request.args.get("onlyAI", "false").lower() == "true"
+    start_date = request.args.get("startDate")
+    end_date = request.args.get("endDate")
+
+    # 建议长度偏好（full/short）
+    suggest_pref = (request.args.get("suggest", "full") or "full").lower()
+
     start = (page - 1) * page_size
     end = start + page_size - 1
 
@@ -126,6 +135,24 @@ def get_news_list():
         # 视图里 publish_time 是 timestamptz/文本？这里统一用 ilike 兼容
         query = query.ilike("publish_time::text", f"{date}%")
 
+    # 日期范围（闭区间）
+    if start_date:
+        query = query.gte("publish_time", f"{start_date}T00:00:00")
+    if end_date:
+        query = query.lte("publish_time", f"{end_date}T23:59:59.999999")
+
+    # 视角快捷逻辑
+    if view == "management":
+        # 高管视角：优先有 AI 建议
+        query = query.filter("ai_suggestion", "not.is", "null").neq("ai_suggestion", "")
+    elif view == "analysis":
+        # 分析视角：有长摘要
+        query = query.filter("long_summary", "not.is", "null").neq("long_summary", "")
+
+    # 显式只看有AI
+    if only_ai:
+        query = query.filter("ai_suggestion", "not.is", "null").neq("ai_suggestion", "")
+
     # 排序（先按 publish_time 降序，再按 id 降序，保证稳定）
     query = query.order("publish_time", desc=True).order("id", desc=True)
 
@@ -141,11 +168,27 @@ def get_news_list():
         # id, title, publish_time, source_url, source_type, news_type,
         # clean_text, short_summary, long_summary, created_at, updated_at
         date_str, time_str = parse_time_maybe(r.get("publish_time"))
-        created_at_iso = iso_utc(datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))) if r.get("created_at") else None
+
+        # 统一处理 AI 建议 & 时间字段兜底
+        ai_full = r.get("ai_suggestion_full")
+        ai_short = r.get("ai_suggestion")
+        if suggest_pref == "full":
+            ai_selected = ai_full or ai_short
+        else:
+            ai_selected = ai_short or ai_full
+
+        # createdAt 兼容不同视图列名
+        created_col = r.get("summary_created_at") or r.get("created_at")
+        created_at_iso = None
+        if created_col:
+            try:
+                created_at_iso = iso_utc(datetime.fromisoformat(str(created_col).replace("Z", "+00:00")))
+            except Exception:
+                created_at_iso = str(created_col)
 
         news_list.append({
             "id": r["id"],
-            "category": map_category(r.get("news_type")),  # 返回英文枚举
+            "category": map_category(r.get("news_type")),
             "title": r.get("title"),
             "source": r.get("source_type"),
             "time": time_str,
@@ -153,7 +196,13 @@ def get_news_list():
             "readTime": estimate_read_time(r.get("clean_text") or ""),
             "link": r.get("source_url"),
             "summary": r.get("short_summary"),
-            "actionSuggestion": None,
+
+            # === AI 建议：按照参数选择返回，同时把两种都透出，前端可自行选择 ===
+            "actionSuggestion": ai_selected,
+            "actionSuggestionFull": ai_full,
+            "actionSuggestionShort": ai_short,
+            "hasAI": bool((ai_full and ai_full.strip()) or (ai_short and ai_short.strip())),
+
             "relatedNews": [],
             "createdAt": created_at_iso,
         })
@@ -202,6 +251,16 @@ def get_news_detail(news_id: str):
 
     date_str, time_str = parse_time_maybe(r.get("publish_time"))
 
+    # 建议长度偏好（full/short）
+    suggest_pref = (request.args.get("suggest", "full") or "full").lower()
+
+    ai_full = r.get("ai_suggestion_full")
+    ai_short = r.get("ai_suggestion")
+    if suggest_pref == "full":
+        ai_selected = ai_full or ai_short
+    else:
+        ai_selected = ai_short or ai_full
+
     # created/updated 容错
     def to_iso_safe(v: Optional[str]) -> Optional[str]:
         if not v:
@@ -222,9 +281,16 @@ def get_news_detail(news_id: str):
         "link": r.get("source_url"),
         "content": r.get("clean_text"),
         "summary": r.get("long_summary"),
-        "actionSuggestion": None,
+
+        # === AI 建议：按照参数选择返回，同时把两种都透出，前端可自行选择 ===
+        "actionSuggestion": ai_selected,
+        "actionSuggestionFull": ai_full,
+        "actionSuggestionShort": ai_short,
+
         "relatedNews": [],
-        "tags": [],  # 可从 summary_json.entities 推出（若视图中有暴露）
+
+        # 若视图存在 tags_json / entities_json，择一透出；否则为空列表
+        "tags": r.get("tags_json") or r.get("entities_json") or [],
         "createdAt": to_iso_safe(r.get("created_at")),
         "updatedAt": to_iso_safe(r.get("updated_at")),
     }
