@@ -87,7 +87,7 @@ def _count_papers_between(start: datetime, end: datetime) -> int:
 
 def _count_competitors_updated_between(start: datetime, end: datetime) -> int:
     res = (
-        sb.table("competitors")
+        sb.table("00_competitors")
         .select("id", count="exact")
         .gte("last_analyzed", start.isoformat())
         .lte("last_analyzed", end.isoformat())
@@ -162,7 +162,7 @@ def get_data_cards_latest():
 
     # === 各自的锚点时间（可能为 None） ===
     anchor_news_dt = _get_latest_date(VIEW_NAME, "publish_time")
-    anchor_comp_dt = _get_latest_date("competitors", "last_analyzed")
+    anchor_comp_dt = _get_latest_date("00_competitors", "last_analyzed")
     anchor_paper_dt = _get_latest_date("00_papers", "published_at")
 
     # 总体 date 仍然返回三表最大时间（兼容原前端）
@@ -204,7 +204,7 @@ def get_data_cards_latest():
     # 预警监控：跟随 competitors 的锚点与窗口
     if comp_cur_s:
         res = (
-            sb.table("competitors")
+            sb.table("00_competitors")
             .select("id,product")
             .gte("last_analyzed", comp_cur_s.isoformat())
             .lte("last_analyzed", comp_cur_e.isoformat())
@@ -217,7 +217,7 @@ def get_data_cards_latest():
 
     if comp_prev_s:
         res_prev = (
-            sb.table("competitors")
+            sb.table("00_competitors")
             .select("id,product")
             .gte("last_analyzed", comp_prev_s.isoformat())
             .lte("last_analyzed", comp_prev_e.isoformat())
@@ -319,7 +319,7 @@ def get_data_cards_trend():
     elif card_id == 4:
         def _count_alert(ds, de):
             r = (
-                sb.table("competitors")
+                sb.table("00_competitors")
                 .select("id,product")
                 .gte("last_analyzed", ds.isoformat())
                 .lte("last_analyzed", de.isoformat())

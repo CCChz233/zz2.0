@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List
 
 import requests
+SESSION = requests.Session()
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -92,6 +93,8 @@ PROMPT_TPL = """
 - 只使用给定文本里的信息，不能虚构
 - 保留关键数字与时间
 - 忽略噪声
+- 若缺信息用空字符串或空数组，不得编造
+- 禁止注释与尾随逗号；不输出 Markdown 代码块
 - 严格输出 JSON（不要任何额外说明或 Markdown 代码块）
 
 标题提示：{title_hint}
@@ -130,10 +133,13 @@ DASHSCOPE_BASES = [
 def safe_truncate(s: str, max_len: int) -> str:
     return s[:max_len] if len(s) > max_len else s
 
+FENCE_RE = re.compile(r'^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$', re.I)
+
 def _strip_fence_to_json(s: str) -> dict:
-    s = s.strip()
-    if s.startswith("```"):
-        s = s.strip("`").replace("json", "", 1).strip()
+    s = (s or "").strip()
+    m = FENCE_RE.match(s)
+    if m:
+        s = m.group(1)
     i, j = s.find("{"), s.rfind("}")
     if 0 <= i < j:
         s = s[i:j+1]
@@ -151,15 +157,16 @@ def qwen_chat_json(prompt: str, timeout: int = 60, max_retries: int = 6) -> Dict
                     {"role": "user", "content": prompt}
                 ]
             },
-            "parameters": {"result_format": "json", "temperature": 0.2, "top_p": 0.8}
+            "parameters": {"result_format": "json", "temperature": 0.0, "top_p": 0.8}
         }
 
     def make_payload_plain():
-        return {
-            "model": QWEN_MODEL,
-            "input": prompt,
-            "parameters": {"temperature": 0.2, "top_p": 0.8}
-        }
+            sys = "你是严谨的新闻编辑，严格输出 JSON。"
+            return {
+                "model": QWEN_MODEL,
+                "input": f"{sys}\n\n{prompt}",
+                "parameters": {"result_format": "json", "temperature": 0.0, "top_p": 0.8}
+            }
 
     attempt, use_plain_input = 0, False
     bases_to_try = DASHSCOPE_BASES[:]
@@ -171,7 +178,7 @@ def qwen_chat_json(prompt: str, timeout: int = 60, max_retries: int = 6) -> Dict
         payload = make_payload_plain() if use_plain_input else make_payload_messages()
 
         try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=timeout)
+            resp = SESSION.post(url, headers=headers, json=payload, timeout=timeout)
             if resp.status_code == 200:
                 data = resp.json()
                 out = data.get("output") or {}
@@ -264,6 +271,71 @@ def _normalize_summary_keys(d: Dict[str, Any]) -> Dict[str, Any]:
     }
     return out
 
+def _postprocess_summary(d: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    轻量规整：去空/去重/截断，尽量避免脏数据入库。
+    - bullets：去空/去重，元素截至≤40字符
+    - entities：各数组去空/去重，仅保留字符串
+    - ai_suggestion*：去换行与多余空白
+    """
+    if not isinstance(d, dict):
+        return {"title":"", "short_summary":"", "long_summary":"", "bullets":[], "entities":{}, "ai_suggestion":"", "ai_suggestion_full":""}
+
+    # bullets
+    bullets = d.get("bullets") or []
+    if not isinstance(bullets, list):
+        bullets = []
+    cleaned_bullets = []
+    seen = set()
+    for x in bullets:
+        if not isinstance(x, str):
+            continue
+        xx = x.strip()
+        if not xx:
+            continue
+        xx = xx[:40]
+        if xx not in seen:
+            seen.add(xx)
+            cleaned_bullets.append(xx)
+    d["bullets"] = cleaned_bullets
+
+    # entities
+    ents = d.get("entities") or {}
+    if not isinstance(ents, dict):
+        ents = {}
+    out_ents = {}
+    for k in ("org", "person", "location", "date"):
+        arr = ents.get(k) or []
+        if not isinstance(arr, list):
+            arr = []
+        seen_e = set()
+        cleaned = []
+        for v in arr:
+            if not isinstance(v, str):
+                continue
+            vv = v.strip()
+            if not vv or vv in seen_e:
+                continue
+            seen_e.add(vv)
+            cleaned.append(vv)
+        out_ents[k] = cleaned
+    d["entities"] = out_ents
+
+    # suggestions
+    for key in ("ai_suggestion", "ai_suggestion_full"):
+        val = d.get(key) or ""
+        if isinstance(val, str):
+            val = re.sub(r'\s+', ' ', val).strip()
+            d[key] = val
+
+    # titles and summaries trim
+    for key in ("title", "short_summary", "long_summary"):
+        val = d.get(key)
+        if isinstance(val, str):
+            d[key] = val.strip()
+
+    return d
+
 # ---------------- Multi-Agent Prompts ----------------
 SUMMARY_PROMPT = """
 你是新闻编辑。基于提供正文，输出严格JSON（UTF-8，无注释），所有键必须出现：
@@ -274,7 +346,7 @@ SUMMARY_PROMPT = """
   "bullets": ["", "", ""]    // 3~6条，每条≤40字
 }}
 要求：
-- 仅依据原文，不得虚构；保留关键数字与时间；无说明文字、无Markdown。
+- 仅依据原文，不得虚构；保留关键数字与时间；无说明文字、无Markdown；禁止注释与尾随逗号。
 - 若缺信息请置为 "" 或 []。
 正文：
 \"\"\"{clean_text}\"\"\"
@@ -284,21 +356,41 @@ ENTITIES_PROMPT = """
 你是信息抽取器。抽取实体并输出严格JSON（UTF-8，无注释），所有键必须出现：
 {{ "org":[], "person":[], "location":[], "date":[] }}
 要求：
-- 去重；保持原文表述；无解释；没有就空数组；仅依据给定文本。
+- 去重；保持原文表述；仅依据给定文本；按出现顺序输出。
+- 没有就空数组；禁止注释与尾随逗号；不输出 Markdown 代码块。
 文本：
-\"\"\"{clean_text}\"\"\
+\"\"\"{clean_text}\"\"\"
 """.strip()
 
 ADVISOR_PROMPT = """
-你是行业分析顾问。基于“摘要+要点+实体”，输出建议为严格JSON（UTF-8，无注释）：
+你是战略咨询顾问，服务对象是“致真精密仪器（青岛）有限公司”，请基于输入的“新闻摘要+要点+实体信息”，从企业发展角度生成**行动建议**，输出严格JSON（UTF-8，无注释）：
 {{
-  "ai_suggestion": "",        // ≤80字，具体、可执行、不夸张
-  "ai_suggestion_full": ""    // 150~300字：按“背景→影响→建议动作(1-3条)”组织
+  "ai_suggestion": "",        // ≤80字，概括核心建议，简明可执行
+  "ai_suggestion_full": ""    // 150~300字，结构清晰、逻辑完整，包含 背景→问题→建议动作(1-3条)
 }}
-要求：
-- 仅使用给定信息，不得增加外部事实；避免空话。
-- 两个字段都必须出现；若确无可建议，返回空字符串。
-输入：
+
+【企业背景】
+致真精密仪器（青岛）有限公司成立于2019年，是国家高新技术企业和专精特新“小巨人”企业。
+主营高端科研仪器和集成电路产线测试设备的研发与生产，聚焦国产高端仪器的自主创新。
+产品涵盖原子力显微镜、磁学测量设备、芯片测试装备、低温光学平台等，在清华大学、中科院及集成电路企业广泛应用。
+公司研发人员占比超50%，拥有多项专利及完整的光、电、机械、测控、算法研发体系。
+总部位于青岛，北京与杭州设有研发中心。
+企业宗旨：“用精密仪器赋能科技创新，为中国集成电路制造提供可靠设备。”
+
+【任务要求】
+- 建议应体现对企业自身定位与行业趋势的理解，结合输入内容提出具体、现实、可执行的行动方向。
+- 可从以下角度切入（视输入内容选择1–3项）：
+  - 技术与产品创新（突破国产替代瓶颈、研发新代际设备）
+  - 市场拓展与客户合作（科研机构、高校、集成电路企业）
+  - 产业链协同与产学研融合（联合攻关、标准制定）
+  - 品牌与国际竞争力（提升影响力、质量认证、国际合作）
+  - 政策与资本支持（利用高新/小巨人政策资源）
+- 严禁空洞表述，避免泛泛而谈。
+- 必须基于提供的新闻信息推理，不得虚构外部事实。
+- 若缺乏合理依据，请返回空字符串。
+- 不输出 Markdown 与注释；禁止尾随逗号。
+
+【输入内容】
 【短摘要】{short_summary}
 【要点】{bullets_json}
 【实体】{entities_json}
@@ -352,7 +444,8 @@ def summarize_with_qwen(clean_text_: str, title_hint: str = "") -> Dict[str, Any
     body = safe_truncate(clean_text_, 6000)
     prompt = PROMPT_TPL.format(title_hint=title_hint or "无", body=body)
     raw = qwen_chat_json(prompt)
-    return _normalize_summary_keys(raw)
+    norm = _normalize_summary_keys(raw)
+    return _postprocess_summary(norm)
 
 def upsert_summary(row: Dict[str, Any], clean_txt: str, summary: Dict[str, Any]) -> None:
     short_summary = (summary.get("short_summary") or "").strip()
@@ -427,6 +520,7 @@ def run_pipeline_multi(max_batches: int = 10, batch_size: int = BATCH_SIZE, slee
                     "ai_suggestion": adv.get("ai_suggestion",""),
                     "ai_suggestion_full": adv.get("ai_suggestion_full",""),
                 }
+                summary = _postprocess_summary(summary)
                 upsert_summary(r, clean, summary)
                 processed += 1
                 logger.info(f"✅(multi) 已处理 {news_id} | {summary.get('short_summary','')[:30]}...")

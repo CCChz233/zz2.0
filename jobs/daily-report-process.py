@@ -54,7 +54,7 @@ FORCE_REFRESH = os.getenv("FORCE_REFRESH", "0") == "1"
 DEBUG         = os.getenv("DEBUG", "0") == "1"
 
 ANALYSIS_TABLE = "analysis_results"
-COMP_TABLE     = "competitors"
+COMP_TABLE     = "00_competitors"
 DDR_TABLE      = "dashboard_daily_reports"
 
 if not all([SUPABASE_URL, SUPABASE_KEY, QWEN_API_KEY]):
@@ -317,11 +317,23 @@ def fetch_competitors_map(comp_ids: Set[str]) -> Dict[str, Dict[str, Any]]:
     if not comp_ids:
         return {}
     res = sb.table(COMP_TABLE) \
-        .select("id,name,product,website") \
+        .select("id, company_name, product, website") \
         .in_("id", list(comp_ids)) \
         .execute()
     rows = res.data or []
-    return {r["id"]: r for r in rows}
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        cid = r.get("id")
+        if not cid:
+            continue
+        out[cid] = {
+            "id": cid,
+            # 兼容下游 comp["name"] 的用法
+            "name": r.get("company_name") or "",
+            "product": r.get("product") or "",
+            "website": r.get("website") or "",
+        }
+    return out
 
 def fetch_existing_map(report_date: str, view: str) -> Dict[str, Optional[str]]:
     """
