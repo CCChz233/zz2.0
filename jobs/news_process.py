@@ -9,7 +9,10 @@ News Cleaning + Qwen Summarization + Supabase Upsert (完整修正版)
     SUPABASE_URL=...
     SUPABASE_SERVICE_KEY=...
     QWEN_API_KEY=...
-    QWEN_MODEL=qwen-turbo
+    QWEN_MODEL=qwen-max   # 或使用 qwen-max-latest
+    DASHSCOPE_API_KEY=...        # 可与 QWEN_API_KEY 二选一
+    DASHSCOPE_REGION=cn          # cn | intl | finance
+    QWEN_OPENAI_COMPAT=0         # 设为1启用 OpenAI 兼容接口
 """
 
 import os
@@ -32,7 +35,11 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-turbo")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-max")
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+API_KEY = DASHSCOPE_API_KEY or QWEN_API_KEY  # 兼容两种命名
+DASHSCOPE_REGION = os.getenv("DASHSCOPE_REGION", "cn").lower()  # cn | intl | finance
+QWEN_OPENAI_COMPAT = os.getenv("QWEN_OPENAI_COMPAT", "").lower() in ("1","true","yes")
 
 PIPELINE_MODE = os.getenv("PIPELINE_MODE", "multi").lower()  # multi | single
 RAW_NEWS_TABLE = os.getenv("RAW_NEWS_TABLE", "00_news")      # 原始新闻表
@@ -130,6 +137,12 @@ DASHSCOPE_BASES = [
     "https://dashscope-intl.aliyuncs.com",   # 国际
 ]
 
+DASHSCOPE_COMPAT_BASES = {
+    "cn": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "intl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    "finance": "https://dashscope-finance.aliyuncs.com/compatible-mode/v1",
+}
+
 def safe_truncate(s: str, max_len: int) -> str:
     return s[:max_len] if len(s) > max_len else s
 
@@ -145,8 +158,77 @@ def _strip_fence_to_json(s: str) -> dict:
         s = s[i:j+1]
     return json.loads(s)
 
+
+def qwen_chat_json_compat(prompt: str, timeout: int = 60, max_retries: int = 6) -> Dict[str, Any]:
+    """通过 OpenAI 兼容接口 (/chat/completions) 调用（用于 qwen3-* / 需要兼容路径时）。
+    要求模型严格输出 JSON；若服务端不支持 response_format，会自动降级为纯提示词约束。
+    """
+    base = DASHSCOPE_COMPAT_BASES.get(DASHSCOPE_REGION, DASHSCOPE_COMPAT_BASES["cn"])  # 依据地域选择
+    url = f"{base}/chat/completions"
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+    def make_payload(use_resp_fmt: bool = True):
+        body: Dict[str, Any] = {
+            "model": QWEN_MODEL,
+            "messages": [
+                {"role": "system", "content": "你是严谨的新闻编辑，严格输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+        }
+        if use_resp_fmt:
+            # OpenAI 兼容的 JSON 强制：{"type":"json_object"}
+            body["response_format"] = {"type": "json_object"}
+        return body
+
+    attempt, use_resp_fmt = 0, True
+    while True:
+        attempt += 1
+        try:
+            payload = make_payload(use_resp_fmt)
+            resp = SESSION.post(url, headers=headers, json=payload, timeout=timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                # OpenAI 兼容形态：choices[0].message.content
+                choices = data.get("choices") or []
+                if not choices:
+                    raise ValueError("OpenAI兼容接口返回空choices")
+                text = (choices[0].get("message") or {}).get("content") or ""
+                if not text:
+                    raise ValueError("OpenAI兼容接口content为空")
+                return _strip_fence_to_json(text)
+
+            # 400 且包含 response_format 相关错误时，降级去掉 response_format 再试
+            if resp.status_code == 400 and "response_format" in (resp.text or "") and use_resp_fmt:
+                logger.warning("兼容接口不支持 response_format，降级仅用提示词约束 JSON")
+                use_resp_fmt = False
+                continue
+
+            # 限流/服务端错误重试
+            if resp.status_code in (429, 500, 502, 503, 504):
+                wait = min(2 ** (attempt - 1), 20) * (1 + random.random())
+                logger.warning(f"兼容接口 {resp.status_code}，睡 {wait:.1f}s 后重试")
+                time.sleep(wait)
+                continue
+
+            # 鉴权与权限（常见：401=Key或地域不匹配；403=无该模型权限）
+            if resp.status_code in (401, 403):
+                raise RuntimeError(f"DashScope兼容接口鉴权/权限错误 {resp.status_code}: {resp.text[:180]}")
+
+            resp.raise_for_status()
+        except Exception as e:
+            if attempt < max_retries:
+                wait = min(2 ** (attempt - 1), 10)
+                logger.warning(f"兼容接口网络异常，第{attempt}次重试，睡 {wait:.1f}s | {e}")
+                time.sleep(wait)
+                continue
+            raise
+
 def qwen_chat_json(prompt: str, timeout: int = 60, max_retries: int = 6) -> Dict[str, Any]:
-    headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
+    if QWEN_OPENAI_COMPAT or QWEN_MODEL.lower().startswith("qwen3-"):
+        logger.info("使用 OpenAI 兼容接口调用：/chat/completions")
+        return qwen_chat_json_compat(prompt, timeout=timeout, max_retries=max_retries)
+    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
 
     def make_payload_messages():
         return {
