@@ -5,6 +5,8 @@
 - 每日AI简报 API (daily-report)
 - KPI 概览接口 (data-cards) 
 - 新闻 API (news)
+- 地图模块 API (databoard-map)
+- 数据模块 API (databoard-data)
 """
 
 import os
@@ -16,6 +18,8 @@ from flask_cors import CORS
 from backend_api.daily_report_bp import daily_report_bp
 from backend_api.data_cards_bp import data_cards_bp
 from backend_api.news_bp import news_bp
+from backend_api.databoard_map_bp import databoard_map_bp
+from backend_api.databoard_data_bp import databoard_data_bp
 from backend_api.user_bp import user_bp
 
 # 创建Flask应用
@@ -44,6 +48,8 @@ CORS(app,
 app.register_blueprint(daily_report_bp, url_prefix='/api/dashboard')
 app.register_blueprint(data_cards_bp, url_prefix='/api/dashboard')
 app.register_blueprint(news_bp, url_prefix='/api/dashboard')
+app.register_blueprint(databoard_map_bp, url_prefix='/api/databoard/map')
+app.register_blueprint(databoard_data_bp, url_prefix='/api/databoard/data')
 app.register_blueprint(user_bp, url_prefix='/api')
 
 # 健康检查接口
@@ -59,6 +65,8 @@ def index():
             "每日AI简报: /api/dashboard/daily-report",
             "KPI概览: /api/dashboard/data-cards", 
             "新闻服务: /api/dashboard/news",
+            "地图模块: /api/databoard/map",
+            "数据模块: /api/databoard/data",
             "用户认证: /api/user/login, /api/user/info, /api/user/logout"
         ]
     }
@@ -75,6 +83,8 @@ if __name__ == "__main__":
     print(f"📊 每日AI简报: http://127.0.0.1:{port}/api/dashboard/daily-report")
     print(f"📈 KPI概览: http://127.0.0.1:{port}/api/dashboard/data-cards")
     print(f"📰 新闻服务: http://127.0.0.1:{port}/api/dashboard/news")
+    print(f"🗺️ 地图模块: http://127.0.0.1:{port}/api/databoard/map")
+    print(f"📊 数据模块: http://127.0.0.1:{port}/api/databoard/data")
     print(f"👤 用户认证: http://127.0.0.1:{port}/api/user/login")
 
     app.run(host="0.0.0.0", port=port, debug=True)

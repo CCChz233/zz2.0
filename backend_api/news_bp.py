@@ -14,12 +14,13 @@ from datetime import datetime
 from typing import Optional
 
 from flask import Blueprint, request, jsonify, make_response
+from postgrest.exceptions import APIError
 from supabase import create_client
 
 # ====== 配置 ======
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s")
-VIEW_NAME = os.getenv("NEWS_FEED_VIEW", "news_feed_ready_view")  # 你创建的视图名
+VIEW_NAME = os.getenv("NEWS_FEED_VIEW", "news_feed_ready_view_v2")  # 你创建的视图名
 
 # ====== 初始化 ======
 news_bp = Blueprint('news', __name__)
@@ -121,6 +122,7 @@ def get_news_list():
     # ✅ 只返回「有摘要」的记录（服务端过滤，total 与数据一致）
     # 兼容不同 supabase-py 版本，统一用 filter("not.is","null")
     query = query.filter("short_summary", "not.is", "null").neq("short_summary", "")
+    # query = query.filter("long_summary", "not.is", "null").neq("long_summary", "")
 
     # 分类筛选（按英文枚举）
     if category != "all":
@@ -230,17 +232,26 @@ def get_news_list():
 @news_bp.route("/news/<string:news_id>", methods=["GET"])
 def get_news_detail(news_id: str):
     # 只查有摘要的记录
-    res = (
-        sb.table(VIEW_NAME)
-        .select("*")
-        .eq("id", news_id)
-        .filter("long_summary", "not.is", "null")
-        .neq("long_summary", "")
-        .single()
-        .execute()
-    )
-    r = res.data
-    if not r:
+    try:
+        res = (
+            sb.table(VIEW_NAME)
+            .select("*")
+            .eq("id", news_id)
+            .filter("long_summary", "not.is", "null")
+            .neq("long_summary", "")
+            .maybe_single()
+            .execute()
+        )
+    except APIError as e:
+        # 统一兜底：将 Supabase 返回的 0 行错误转换成 404
+        details = (getattr(e, "details", "") or "").lower()
+        message = (getattr(e, "message", "") or "").lower()
+        if "0 rows" in details or "0 rows" in message:
+            res = None
+        else:
+            raise
+
+    if not res or not getattr(res, "data", None):
         error_data = {"code": 404, "message": "not found", "data": {}}
         response = make_response(
             json.dumps(error_data, ensure_ascii=False, indent=2)
@@ -248,6 +259,8 @@ def get_news_detail(news_id: str):
         response.status_code = 404
         response.mimetype = 'application/json; charset=utf-8'
         return response
+
+    r = res.data
 
     date_str, time_str = parse_time_maybe(r.get("publish_time"))
 

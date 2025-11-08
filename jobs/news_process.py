@@ -22,7 +22,7 @@ import time
 import random
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import requests
 SESSION = requests.Session()
@@ -44,7 +44,9 @@ QWEN_OPENAI_COMPAT = os.getenv("QWEN_OPENAI_COMPAT", "").lower() in ("1","true",
 PIPELINE_MODE = os.getenv("PIPELINE_MODE", "multi").lower()  # multi | single
 RAW_NEWS_TABLE = os.getenv("RAW_NEWS_TABLE", "00_news")      # 原始新闻表
 
+
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", "20"))  # 每批文章数量
+BATCHES_DEFAULT = int(os.getenv("BATCHES", "20"))  # 默认批次数（可用环境变量 BATCHES 覆盖）
 
 if not all([SUPABASE_URL, SUPABASE_KEY, QWEN_API_KEY]):
     raise SystemExit("请设置 SUPABASE_URL / SUPABASE_SERVICE_KEY / QWEN_API_KEY")
@@ -111,11 +113,14 @@ PROMPT_TPL = """
 
 # ---------------- Supabase IO ----------------
 def fetch_articles_batch(offset: int, limit: int) -> List[Dict[str, Any]]:
-    res = sb.table(RAW_NEWS_TABLE) \
-        .select("id,title,content,publish_time,source_url,source_type") \
-        .order("id", desc=True) \
-        .range(offset, offset + limit - 1) \
+    res = (
+        sb.table(RAW_NEWS_TABLE)
+        .select("id,title,content,publish_time,source_url,source_type")
+        .order("publish_time", desc=True, nullsfirst=False)
+        .order("id", desc=True)
+        .range(offset, offset + limit - 1)
         .execute()
+    )
     return res.data or []
 
 def fetch_summaries_map(ids: List[str]) -> Dict[str, Dict[str, Any]]:
@@ -552,9 +557,18 @@ def upsert_summary(row: Dict[str, Any], clean_txt: str, summary: Dict[str, Any])
 
 from concurrent.futures import ThreadPoolExecutor
 
-def run_pipeline_multi(max_batches: int = 10, batch_size: int = BATCH_SIZE, sleep_sec: float = 0.5, only_missing: bool = True):
+def run_pipeline_multi(
+    max_batches: int = 10,
+    batch_size: int = BATCH_SIZE,
+    sleep_sec: float = 0.5,
+    only_missing: bool = True,
+    latest_limit: Optional[int] = None,
+):
     processed = 0
+    remaining = latest_limit if latest_limit is not None and latest_limit > 0 else None
     for b in range(max_batches):
+        if remaining is not None and remaining <= 0:
+            break
         rows = fetch_articles_batch(offset=b * batch_size, limit=batch_size)
         if not rows:
             logger.info("没有更多数据，处理完成。")
@@ -572,6 +586,8 @@ def run_pipeline_multi(max_batches: int = 10, batch_size: int = BATCH_SIZE, slee
             if not rows:
                 logger.info("本批全部已有建议，跳过。")
                 continue
+        if remaining is not None and len(rows) > remaining:
+            rows = rows[:remaining]
         for r in rows:
             news_id = r["id"]
             title_hint = r.get("title") or ""
@@ -605,6 +621,8 @@ def run_pipeline_multi(max_batches: int = 10, batch_size: int = BATCH_SIZE, slee
                 summary = _postprocess_summary(summary)
                 upsert_summary(r, clean, summary)
                 processed += 1
+                if remaining is not None:
+                    remaining -= 1
                 logger.info(f"✅(multi) 已处理 {news_id} | {summary.get('short_summary','')[:30]}...")
             except Exception as e:
                 logger.error(f"[ERROR] id={news_id}: {e}", exc_info=True)
@@ -613,15 +631,44 @@ def run_pipeline_multi(max_batches: int = 10, batch_size: int = BATCH_SIZE, slee
     logger.info(f"(multi) 管线结束，总处理条数：{processed}")
 
 # ---------------- Pipeline ----------------
-def run_pipeline(max_batches: int = 10, batch_size: int = BATCH_SIZE, sleep_sec: float = 0.5, only_missing: bool = False):
+def run_pipeline(
+    max_batches: int = 10,
+    batch_size: int = BATCH_SIZE,
+    sleep_sec: float = 0.5,
+    only_missing: bool = True,
+    latest_limit: Optional[int] = None,
+):
     if PIPELINE_MODE == "multi":
-        return run_pipeline_multi(max_batches=max_batches, batch_size=batch_size, sleep_sec=sleep_sec, only_missing=True)
+        return run_pipeline_multi(
+            max_batches=max_batches,
+            batch_size=batch_size,
+            sleep_sec=sleep_sec,
+            only_missing=only_missing,
+            latest_limit=latest_limit,
+        )
     processed = 0
+    remaining = latest_limit if latest_limit is not None and latest_limit > 0 else None
     for b in range(max_batches):
+        if remaining is not None and remaining <= 0:
+            break
         rows = fetch_articles_batch(offset=b * batch_size, limit=batch_size)
         if not rows:
             logger.info("没有更多数据，处理完成。")
             break
+        if only_missing:
+            ids = [r["id"] for r in rows]
+            smap = fetch_summaries_map(ids)
+            rows = [
+                r for r in rows
+                if not smap.get(str(r["id"])) or not (
+                    smap[str(r["id"])].get("ai_suggestion") and smap[str(r["id"])].get("ai_suggestion_full")
+                )
+            ]
+            if not rows:
+                logger.info("本批全部已有摘要/建议，跳过。")
+                continue
+        if remaining is not None and len(rows) > remaining:
+            rows = rows[:remaining]
         for r in rows:
             news_id = r["id"]
             title_hint = r.get("title") or ""
@@ -634,6 +681,8 @@ def run_pipeline(max_batches: int = 10, batch_size: int = BATCH_SIZE, sleep_sec:
                 summary = summarize_with_qwen(clean, title_hint)
                 upsert_summary(r, clean, summary)
                 processed += 1
+                if remaining is not None:
+                    remaining -= 1
                 logger.info(f"✅(single) 已处理 {news_id} | {summary.get('short_summary','')[:30]}...")
             except Exception as e:
                 logger.error(f"[ERROR] id={news_id}: {e}", exc_info=True)
@@ -645,12 +694,21 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["single","multi"], default=PIPELINE_MODE)
-    parser.add_argument("--batches", type=int, default=10)
+    parser.add_argument("--batches", type=int, default=BATCHES_DEFAULT)
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--sleep", type=float, default=0.5)
-    parser.add_argument("--only-missing", action="store_true", help="仅处理缺少建议的新闻（multi模式内置为True）")
+    parser.add_argument("--process-all", dest="only_missing", action="store_false", help="不论是否已有摘要/建议，全部重算")
+    parser.set_defaults(only_missing=True)
+    parser.add_argument("--latest", type=int, default=0, help="仅处理最新 N 条新闻（0 表示不限）")
     args = parser.parse_args()
     logger.info(f"Qwen 模型: {QWEN_MODEL} | 批大小: {args.batch_size} | 模式: {args.mode} | 表: {RAW_NEWS_TABLE}")
     # 覆盖一次运行模式
     PIPELINE_MODE = args.mode
-    run_pipeline(max_batches=args.batches, batch_size=args.batch_size, sleep_sec=args.sleep, only_missing=args.only_missing)
+    latest_limit = args.latest if args.latest > 0 else None
+    run_pipeline(
+        max_batches=args.batches,
+        batch_size=args.batch_size,
+        sleep_sec=args.sleep,
+        only_missing=args.only_missing,
+        latest_limit=latest_limit,
+    )
