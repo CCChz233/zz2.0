@@ -254,7 +254,7 @@ def get_data_cards_latest():
         },
         {
             "id": 3,
-            "label": "科技论文",
+            "label": "相关论文",
             "value": f"{papers_curr} 篇",
             "trend": {"type": t3, "text": txt3, "icon": icon3},
             "progress": _progress_from_value(papers_curr, 20),
@@ -262,7 +262,7 @@ def get_data_cards_latest():
         },
         {
             "id": 4,
-            "label": "相关新闻",
+            "label": "新闻消息",
             "value": f"{alerts_curr} 个",
             "trend": {"type": t4, "text": txt4, "icon": icon4},
             "progress": _progress_from_value(alerts_curr, 10),
