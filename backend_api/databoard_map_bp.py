@@ -81,23 +81,25 @@ CN_REGION_NAME_FIELDS = {
 # 统一事实表的类型字段（按此过滤：news/leads/tenders/policies）
 
 TYPE_FIELD = os.getenv("MAP_TYPE_FIELD", "type")
-# === 一一映射：前端四类 → 原始四张源表（按你的要求强绑定）
-# 你可以在这里按需调整映射；查询时会用 src_table 精确过滤，不再用 type 字段。
+# === 前端类型 → 数据库源表映射
+# 注意：这里的英文名称（leads/tenders/policies）是 API 接口字段名，为了保持 API 兼容性而保留
+# 实际数据内容与字段名的字面含义不完全一致，请参考 TYPE_DISPLAY_NAMES 了解实际含义
+# 查询时会用 src_table 精确过滤，不再用 type 字段
 SRC_TABLE_FIELD = os.getenv("MAP_SRC_TABLE_FIELD", "src_table")
 TYPE_TO_SRC_TABLE = {
-    "news": "00_news",                 # 新闻 → 00_news
-    "leads": "00_competitors_news",    # 线索 → 00_competitors_news
-    "tenders": "00_opportunity",        # 招标 → 00_opportunity
-    "policies": "00_papers",            # 政策 → 00_papers
+    "news": "00_news",                 # API字段: news → 数据库表: 00_news (新闻表)
+    "leads": "00_competitors_news",    # API字段: leads (历史命名，实际是竞品动态) → 数据库表: 00_competitors_news
+    "tenders": "00_opportunity",        # API字段: tenders → 数据库表: 00_opportunity (招标机会表)
+    "policies": "00_papers",            # API字段: policies (历史命名，实际是科技论文) → 数据库表: 00_papers
 }
 
-# === 类型显示名称映射（用于前端显示，更符合表内容）
-# 根据实际表名和内容，建议使用更准确的显示名称
+# === 类型显示名称映射（用于前端显示，反映实际数据内容）
+# 这是前端展示给用户的名称，更准确地反映了数据的实际内容
 TYPE_DISPLAY_NAMES = {
-    "news": "新闻",                    # 00_news → 新闻
-    "leads": "竞品动态",               # 00_competitors_news → 竞品动态（原"线索"）
-    "tenders": "招标机会",             # 00_opportunity → 招标机会（原"招标"）
-    "policies": "政策文件",            # 00_papers → 政策文件（原"政策"）
+    "news": "相关新闻",      # 00_news: 相关新闻
+    "leads": "竞品动态",     # 00_competitors_news: 竞品动态（注：API字段名是 leads，但实际内容是竞品新闻）
+    "tenders": "招标机会",   # 00_opportunity: 招标机会
+    "policies": "科技论文",  # 00_papers: 科技论文（注：API字段名是 policies，但实际内容是科技论文，不是政策）
 }
 
 # 世界地图用的国家字段（推荐使用英文名或 ISO 码）
@@ -761,10 +763,10 @@ def _ensure_stat_item(code: str, name: Optional[str], data: Dict[str, Any]) -> D
         "trend": float(data.get("trend", 0.0)),
         # 添加显示名称映射，方便前端使用
         "typeLabels": {
-            "leads": TYPE_DISPLAY_NAMES.get("leads", "线索"),
-            "tenders": TYPE_DISPLAY_NAMES.get("tenders", "招标"),
-            "policies": TYPE_DISPLAY_NAMES.get("policies", "政策"),
-            "news": TYPE_DISPLAY_NAMES.get("news", "新闻"),
+            "leads": TYPE_DISPLAY_NAMES.get("leads", "竞品动态"),
+            "tenders": TYPE_DISPLAY_NAMES.get("tenders", "招标机会"),
+            "policies": TYPE_DISPLAY_NAMES.get("policies", "科技论文"),
+            "news": TYPE_DISPLAY_NAMES.get("news", "相关新闻"),
         },
     }
 
@@ -971,10 +973,10 @@ def get_map_data():
         "summary": _sum_summary(statistics),
         # 添加类型显示名称映射到顶层，方便前端直接使用
         "typeLabels": {
-            "leads": TYPE_DISPLAY_NAMES.get("leads", "线索"),
-            "tenders": TYPE_DISPLAY_NAMES.get("tenders", "招标"),
-            "policies": TYPE_DISPLAY_NAMES.get("policies", "政策"),
-            "news": TYPE_DISPLAY_NAMES.get("news", "新闻"),
+            "leads": TYPE_DISPLAY_NAMES.get("leads", "竞品动态"),
+            "tenders": TYPE_DISPLAY_NAMES.get("tenders", "招标机会"),
+            "policies": TYPE_DISPLAY_NAMES.get("policies", "科技论文"),
+            "news": TYPE_DISPLAY_NAMES.get("news", "相关新闻"),
         },
     }
     return _json_ok(data)
@@ -1181,10 +1183,10 @@ def get_map_summary():
         "byType": part_values,
         # 添加类型显示名称映射
         "typeLabels": {
-            "leads": TYPE_DISPLAY_NAMES.get("leads", "线索"),
-            "tenders": TYPE_DISPLAY_NAMES.get("tenders", "招标"),
-            "policies": TYPE_DISPLAY_NAMES.get("policies", "政策"),
-            "news": TYPE_DISPLAY_NAMES.get("news", "新闻"),
+            "leads": TYPE_DISPLAY_NAMES.get("leads", "竞品动态"),
+            "tenders": TYPE_DISPLAY_NAMES.get("tenders", "招标机会"),
+            "policies": TYPE_DISPLAY_NAMES.get("policies", "科技论文"),
+            "news": TYPE_DISPLAY_NAMES.get("news", "相关新闻"),
         },
     }
     return _json_ok(data)

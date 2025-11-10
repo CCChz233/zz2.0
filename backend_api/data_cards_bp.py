@@ -238,7 +238,7 @@ def get_data_cards_latest():
     cards = [
         {
             "id": 1,
-            "label": "今日信息增量",
+            "label": "竞品动态",
             "value": f"{'+' if news_curr > 0 else ''}{news_curr} 条",
             "trend": {"type": t1, "text": txt1, "icon": icon1},
             "progress": _progress_from_value(news_curr, 100),
@@ -246,7 +246,7 @@ def get_data_cards_latest():
         },
         {
             "id": 2,
-            "label": "竞品更新",
+            "label": "招标机会",
             "value": f"{comp_curr} 条",
             "trend": {"type": t2, "text": txt2, "icon": icon2},
             "progress": _progress_from_value(comp_curr, 30),
@@ -254,7 +254,7 @@ def get_data_cards_latest():
         },
         {
             "id": 3,
-            "label": "最新论文",
+            "label": "科技论文",
             "value": f"{papers_curr} 篇",
             "trend": {"type": t3, "text": txt3, "icon": icon3},
             "progress": _progress_from_value(papers_curr, 20),
@@ -262,7 +262,7 @@ def get_data_cards_latest():
         },
         {
             "id": 4,
-            "label": "预警监控数",
+            "label": "相关新闻",
             "value": f"{alerts_curr} 个",
             "trend": {"type": t4, "text": txt4, "icon": icon4},
             "progress": _progress_from_value(alerts_curr, 10),
