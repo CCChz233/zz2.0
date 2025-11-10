@@ -20,6 +20,7 @@ from backend_api.data_cards_bp import data_cards_bp
 from backend_api.news_bp import news_bp
 from backend_api.databoard_map_bp import databoard_map_bp
 from backend_api.databoard_data_bp import databoard_data_bp
+from backend_api.agent_report_bp import agent_report_bp, get_agent_initial_report
 from backend_api.user_bp import user_bp
 
 # 创建Flask应用
@@ -51,6 +52,12 @@ app.register_blueprint(news_bp, url_prefix='/api/dashboard')
 app.register_blueprint(databoard_map_bp, url_prefix='/api/databoard/map')
 app.register_blueprint(databoard_data_bp, url_prefix='/api/databoard/data')
 app.register_blueprint(user_bp, url_prefix='/api')
+app.register_blueprint(agent_report_bp, url_prefix='/api/agent')
+
+# 兼容旧路径：/agent/initial-report
+@app.route("/agent/initial-report", methods=["GET"])
+def agent_initial_report_alias():
+    return get_agent_initial_report()
 
 # 健康检查接口
 @app.route("/healthz", methods=["GET"])

@@ -54,6 +54,14 @@ NEWS_VIEW = os.getenv("DATABOARD_NEWS_VIEW", os.getenv("NEWS_FEED_VIEW", "news_f
 ANALYSIS_TABLE = os.getenv("DATABOARD_ANALYSIS_TABLE", "analysis_results")
 COMPETITOR_TABLE = os.getenv("DATABOARD_COMPETITORS_TABLE", "00_competitors")
 PAPER_TABLE = os.getenv("DATABOARD_PAPERS_TABLE", "fact_papers")
+MONTHLY_TABLE = os.getenv("DATABOARD_MONTHLY_TABLE", "dashboard_daily_events")
+MONTHLY_EVENT_TYPE = os.getenv("DATABOARD_MONTHLY_EVENT_TYPE", "monthly_summary")
+MONTHLY_EVENT_ORDER = [
+    ("monthly-行业新闻", "行业新闻"),
+    ("monthly-竞品动态", "竞品动态"),
+    ("monthly-销售机会", "销售机会"),
+    ("monthly-科技论文", "科技论文"),
+]
 
 DEFAULT_NEWS_MONTHS = int(os.getenv("DATABOARD_NEWS_MONTHS", "12"))
 DEFAULT_TREND_MONTHS = int(os.getenv("DATABOARD_TREND_MONTHS", "6"))
@@ -177,6 +185,55 @@ def _fetch_rows(
             print(f"[WARN] fetch {table} failed at offset={offset}: {exc}")
             break
     return rows[:max_records]
+
+
+def _fetch_monthly_summaries(view: str) -> List[Dict[str, Any]]:
+    """
+    从 dashboard_daily_events（或自定义表）中读取月度汇总结果。
+    返回顺序固定为行业新闻/竞品动态/销售机会/科技论文。
+    """
+    try:
+        res = (
+            sb.table(MONTHLY_TABLE)
+            .select("event_id,payload,priority,category,report_date,created_ts,processed_at,view")
+            .eq("view", view)
+            .eq("event_type", MONTHLY_EVENT_TYPE)
+            .order("report_date", desc=True)
+            .order("created_ts", desc=True)
+            .limit(len(MONTHLY_EVENT_ORDER) * 4)
+            .execute()
+        )
+        rows = res.data or []
+    except Exception as exc:  # pragma: no cover
+        print(f"[WARN] fetch monthly summary failed: {exc}")
+        rows = []
+
+    latest_by_event: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        event_id = row.get("event_id")
+        if not event_id:
+            continue
+        if event_id not in latest_by_event:
+            latest_by_event[event_id] = row
+
+    items: List[Dict[str, Any]] = []
+    for event_id, display_name in MONTHLY_EVENT_ORDER:
+        row = latest_by_event.get(event_id, {})
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        items.append(
+            {
+                "eventId": event_id,
+                "displayName": display_name,
+                "category": row.get("category") or display_name,
+                "reportDate": row.get("report_date"),
+                "priority": (row.get("priority") or "medium").lower(),
+                "createdTs": row.get("created_ts") or row.get("processed_at"),
+                "payload": payload,
+            }
+        )
+    return items
 
 
 def _classify_competitor_event(row: Dict[str, Any]) -> str:
@@ -476,3 +533,27 @@ def get_databoard_data():
         print(f"[ERROR] databoard_data_bp: {exc}")
         return _json_err(500, "internal server error")
 
+
+@databoard_data_bp.route("/getData", methods=["GET"])
+def get_databoard_data_alias():
+    """兼容旧路径 /api/databoard/data/getData，复用 getNews 逻辑。"""
+    return get_databoard_data()
+
+
+@databoard_data_bp.route("/getMonthlySummary", methods=["GET"])
+def get_monthly_summary():
+    """
+    返回 Dashboard 月度综合总结（四类各一条）。
+    默认视角 management，可通过 ?view=xxx 指定。
+    """
+    view = (request.args.get("view") or "management").strip() or "management"
+    try:
+        items = _fetch_monthly_summaries(view)
+        payload = {
+            "view": view,
+            "items": items,
+        }
+        return _json_ok(payload)
+    except Exception as exc:  # pragma: no cover
+        print(f"[ERROR] getMonthlySummary: {exc}")
+        return _json_err(500, "internal server error")
