@@ -74,6 +74,7 @@ MONTHLY_TABLE  = os.getenv("MONTHLY_TABLE", FACT_DDR_TABLE)
 MONTHLY_DAYS   = int(os.getenv("MONTHLY_DAYS", "30"))
 MONTHLY_SOURCE_TABLE = os.getenv("MONTHLY_SOURCE_TABLE", SOURCE_TABLE)
 MONTHLY_LIMIT  = int(os.getenv("MONTHLY_LIMIT", "10"))
+MONTHLY_SUMMARY_MAX_LENGTH = int(os.getenv("MONTHLY_SUMMARY_MAX_LENGTH", "1000"))  # 月度汇总文本最大长度，默认1000字
 
 if not all([SUPABASE_URL, SUPABASE_KEY, API_KEY]):
     raise SystemExit("请设置 SUPABASE_URL / SUPABASE_SERVICE_KEY / QWEN_API_KEY 或 DASHSCOPE_API_KEY")
@@ -359,7 +360,8 @@ def _extract_json_object_text(s: str) -> str:
     """
     从模型输出中稳健抽取 JSON 对象：
     1) 优先使用 ###BEGIN_JSON### ... ###END_JSON### 包裹的对象
-    2) 否则用非贪婪匹配捕获第一个 {...}
+    2) 否则尝试提取所有JSON对象，返回最后一个有效的（处理LLM返回多个JSON的情况）
+    3) 如果都失败，用非贪婪匹配捕获第一个 {...}
     若均失败则抛错
     """
     s = (s or "").strip()
@@ -372,7 +374,59 @@ def _extract_json_object_text(s: str) -> str:
     m = re.search(r"###BEGIN_JSON###\s*({[\s\S]*?})\s*###END_JSON###", s)
     if m:
         return m.group(1)
-    # 2) 非贪婪捕获首个对象
+    
+    # 2) 尝试提取所有JSON对象，返回最后一个有效的（处理多个JSON连在一起的情况）
+    # 使用平衡括号匹配来找到完整的JSON对象
+    json_objects = []
+    i = 0
+    while i < len(s):
+        if s[i] == '{':
+            # 找到匹配的右括号
+            depth = 0
+            start = i
+            j = i
+            while j < len(s):
+                if s[j] == '{':
+                    depth += 1
+                elif s[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        # 找到完整的JSON对象
+                        json_str = s[start:j+1]
+                        try:
+                            # 验证是否是有效的JSON
+                            json.loads(json_str)
+                            json_objects.append(json_str)
+                        except:
+                            pass
+                        i = j + 1
+                        break
+                j += 1
+            else:
+                i += 1
+        else:
+            i += 1
+    
+    # 如果有多个JSON对象，返回最后一个（通常是最完整的）
+    if json_objects:
+        # 优先返回非空的、有内容的JSON对象
+        for obj in reversed(json_objects):
+            try:
+                parsed = json.loads(obj)
+                if isinstance(parsed, dict) and parsed:
+                    # 检查是否有实际内容（不只是空字段）
+                    has_content = any(
+                        v for v in parsed.values() 
+                        if v and (isinstance(v, str) and v.strip()) or (isinstance(v, list) and v)
+                    )
+                    if has_content:
+                        return obj
+            except:
+                continue
+        # 如果都没有内容，返回最后一个
+        return json_objects[-1]
+    
+    # 3) 回退：非贪婪匹配捕获首个对象
     m = re.search(r"({[\s\S]*?})", s)
     if m:
         return m.group(1)
@@ -1321,10 +1375,13 @@ def _extract_clean_text_from_field(value: Any) -> List[str]:
     
     return clean_lines
 
-def _build_text_summary(llm_data: Dict[str, Any], target_length: int = 250) -> str:
+def _build_text_summary(llm_data: Dict[str, Any], target_length: int = None) -> str:
     """
-    从 LLM 返回的 JSON 中提取关键信息，组合成约 250 字的纯文本总结。
+    从 LLM 返回的 JSON 中提取关键信息，组合成纯文本总结。
+    默认长度由 MONTHLY_SUMMARY_MAX_LENGTH 环境变量控制（默认1000字）。
     """
+    if target_length is None:
+        target_length = MONTHLY_SUMMARY_MAX_LENGTH
     # 深度解析，处理可能被错误序列化的字段
     llm_data = _deep_parse_json_field(llm_data)
     
@@ -1446,7 +1503,7 @@ def _build_text_summary(llm_data: Dict[str, Any], target_length: int = 250) -> s
     if original_len > 0 and len(combined) < original_len * 0.8:
         logger.warning(f"[WARN] 清理后文本长度异常缩短: {original_len} -> {len(combined)}")
     
-    # 控制长度到约 250 字（只在最后截断）
+    # 控制长度（默认1000字，可通过 MONTHLY_SUMMARY_MAX_LENGTH 环境变量配置）
     if len(combined) > target_length:
         # 尝试在句号处截断
         truncated = combined[:target_length]
@@ -1542,8 +1599,8 @@ def upsert_monthly_row(category_name: str, payload: Dict[str, Any], days: int, s
     except Exception:
         confidence = 0.5
     
-    # 生成纯文本总结（约 250 字）
-    text_summary = _build_text_summary(llm_data, target_length=250)
+    # 生成纯文本总结（长度由 MONTHLY_SUMMARY_MAX_LENGTH 控制，默认1000字）
+    text_summary = _build_text_summary(llm_data, target_length=MONTHLY_SUMMARY_MAX_LENGTH)
     
     # 构建简洁的 payload
     clean_payload: Dict[str, Any] = {
@@ -1578,7 +1635,12 @@ def upsert_monthly_row(category_name: str, payload: Dict[str, Any], days: int, s
             "processed_at": now_iso,
             "content_hash": content_hash,
         }
-        sb.table(FACT_DDR_TABLE).upsert(row, on_conflict="report_date,view,event_id").execute()
+        try:
+            sb.table(FACT_DDR_TABLE).upsert(row, on_conflict="report_date,view,event_id").execute()
+            logger.info(f"✅ 月度汇总已更新/插入: {category_name} | event_id={event_id} | report_date={end_dt.date().isoformat()} | view={VIEW}")
+        except Exception as e:
+            logger.error(f"❌ 月度汇总写入失败: {category_name} | {e}", exc_info=True)
+            raise
     else:
         row = {
             "period_start": start_dt.date().isoformat(),
@@ -1589,7 +1651,12 @@ def upsert_monthly_row(category_name: str, payload: Dict[str, Any], days: int, s
             "prompt_version": "monthly_v1",
             "processed_at": now_iso,
         }
-        sb.table(MONTHLY_TABLE).upsert(row, on_conflict="period_start,period_end,category").execute()
+        try:
+            sb.table(MONTHLY_TABLE).upsert(row, on_conflict="period_start,period_end,category").execute()
+            logger.info(f"✅ 月度汇总已更新/插入: {category_name} | period={start_dt.date().isoformat()}~{end_dt.date().isoformat()}")
+        except Exception as e:
+            logger.error(f"❌ 月度汇总写入失败: {category_name} | {e}", exc_info=True)
+            raise
 
 def run_monthly_summary():
     logger.info(f"开始月度分类汇总：近{MONTHLY_DAYS}天，每类最新{MONTHLY_LIMIT}条")

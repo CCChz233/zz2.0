@@ -141,6 +141,16 @@ def build_highlights_from_monthly(items: List[Dict[str, Any]]) -> Tuple[List[Dic
             summary_text = _to_text(summary_raw)
             if summary_text:
                 summary_lines = [summary_text]
+        
+        # 调试：检查summary原始长度
+        if summary_raw:
+            import logging
+            logger = logging.getLogger(__name__)
+            raw_len = len(str(summary_raw))
+            if raw_len > 200:
+                logger.debug(f"[DEBUG] summary_raw length: {raw_len} chars, type: {type(summary_raw).__name__}")
+                if isinstance(summary_raw, str):
+                    logger.debug(f"[DEBUG] summary_raw preview: {summary_raw[:150]}...")
 
         outlook = _to_text(payload.get("outlook"))
 
@@ -161,9 +171,16 @@ def build_highlights_from_monthly(items: List[Dict[str, Any]]) -> Tuple[List[Dic
         if title:
             content_parts.append(title)
         if summary_lines:
-            bullets = "\n".join(f"- {line}" for line in summary_lines if line)
-            if bullets:
-                content_parts.append(bullets)
+            # 如果summary_lines只有一个元素且很长，可能是完整的summary字符串
+            # 直接使用，不要加"- "前缀
+            if len(summary_lines) == 1 and len(summary_lines[0]) > 100:
+                # 这是一个长文本，直接使用
+                content_parts.append(summary_lines[0])
+            else:
+                # 多个要点，用列表格式
+                bullets = "\n".join(f"- {line}" for line in summary_lines if line)
+                if bullets:
+                    content_parts.append(bullets)
         if outlook:
             content_parts.append(f"展望：{outlook}")
         if rec_lines:
@@ -172,6 +189,13 @@ def build_highlights_from_monthly(items: List[Dict[str, Any]]) -> Tuple[List[Dic
                 content_parts.append(f"行动建议：\n{actions}")
 
         content = "\n\n".join(part for part in content_parts if part).strip() or "(暂无内容)"
+        
+        # 调试：记录content长度，帮助诊断截断问题
+        if len(content) > 200:
+            import logging
+            logger = logging.getLogger(__name__)
+            category = item.get("displayName") or item.get("category") or "未知分类"
+            logger.debug(f"[DEBUG] content length for {category}: {len(content)} chars, preview: {content[:100]}...")
 
         pr_map = cn_priority(item.get("priority", "medium"))
 

@@ -37,23 +37,10 @@ def _parse_date_arg(d: Optional[str]) -> date_cls:
     return datetime.fromisoformat(d).date()
 
 def _period_window(anchor: date_cls, period: str) -> Tuple[datetime, datetime]:
-    """计算当前周期的起止时间"""
-    if period not in {"day", "week", "month"}:
-        period = "day"
-    if period == "day":
-        start = datetime.combine(anchor, datetime.min.time())
-        end = datetime.combine(anchor, datetime.max.time())
-    elif period == "week":
-        start = datetime.combine(anchor - timedelta(days=6), datetime.min.time())
-        end = datetime.combine(anchor, datetime.max.time())
-    else:  # month
-        first = anchor.replace(day=1)
-        if first.month == 12:
-            next_first = first.replace(year=first.year + 1, month=1, day=1)
-        else:
-            next_first = first.replace(month=first.month + 1, day=1)
-        start = datetime.combine(first, datetime.min.time())
-        end = datetime.combine(next_first - timedelta(seconds=1), datetime.max.time())
+    """计算当前周期的起止时间（固定为最近30天）"""
+    # 固定使用30天窗口
+    end = datetime.combine(anchor, datetime.max.time())
+    start = datetime.combine(anchor - timedelta(days=29), datetime.min.time())
     return start, end
 
 def _previous_window(start: datetime, end: datetime) -> Tuple[datetime, datetime]:
@@ -63,37 +50,109 @@ def _previous_window(start: datetime, end: datetime) -> Tuple[datetime, datetime
     return prev_start, prev_end
 
 # ===================== 数据统计函数 =====================
-def _count_news_between(start: datetime, end: datetime) -> int:
-    res = (
-        sb.table(VIEW_NAME)
-        .select("id", count="exact")
-        .filter("short_summary", "not.is", "null")
-        .neq("short_summary", "")
-        .gte("publish_time", start.isoformat())
-        .lte("publish_time", end.isoformat())
-        .execute()
-    )
-    return res.count or 0
+def _count_competitors_news_between(start: datetime, end: datetime) -> int:
+    """统计 00_competitors_news 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    try:
+        # 优先使用 created_at，如果没有则使用 publish_time
+        res = (
+            sb.table("00_competitors_news")
+            .select("id", count="exact")
+            .gte("created_at", start.isoformat())
+            .lte("created_at", end.isoformat())
+            .execute()
+        )
+        return res.count or 0
+    except Exception:
+        # 回退到使用 publish_time
+        try:
+            res = (
+                sb.table("00_competitors_news")
+                .select("id", count="exact")
+                .gte("publish_time", start.isoformat())
+                .lte("publish_time", end.isoformat())
+                .execute()
+            )
+            return res.count or 0
+        except Exception:
+            return 0
+
+def _count_opportunity_between(start: datetime, end: datetime) -> int:
+    """统计 00_opportunity 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    try:
+        # 优先使用 created_at，如果没有则使用 publish_time
+        res = (
+            sb.table("00_opportunity")
+            .select("id", count="exact")
+            .gte("created_at", start.isoformat())
+            .lte("created_at", end.isoformat())
+            .execute()
+        )
+        return res.count or 0
+    except Exception:
+        # 回退到使用 publish_time
+        try:
+            res = (
+                sb.table("00_opportunity")
+                .select("id", count="exact")
+                .gte("publish_time", start.isoformat())
+                .lte("publish_time", end.isoformat())
+                .execute()
+            )
+            return res.count or 0
+        except Exception:
+            return 0
 
 def _count_papers_between(start: datetime, end: datetime) -> int:
-    res = (
-        sb.table("00_papers")
-        .select("id", count="exact")
-        .gte("published_at", start.date().isoformat())
-        .lte("published_at", end.date().isoformat())
-        .execute()
-    )
-    return res.count or 0
+    """统计 00_papers 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    try:
+        # 优先使用 created_at
+        res = (
+            sb.table("00_papers")
+            .select("id", count="exact")
+            .gte("created_at", start.isoformat())
+            .lte("created_at", end.isoformat())
+            .execute()
+        )
+        return res.count or 0
+    except Exception:
+        # 回退到使用 published_at（date 类型）
+        try:
+            res = (
+                sb.table("00_papers")
+                .select("id", count="exact")
+                .gte("published_at", start.date().isoformat())
+                .lte("published_at", end.date().isoformat())
+                .execute()
+            )
+            return res.count or 0
+        except Exception:
+            return 0
 
-def _count_competitors_updated_between(start: datetime, end: datetime) -> int:
-    res = (
-        sb.table("00_competitors")
-        .select("id", count="exact")
-        .gte("last_analyzed", start.isoformat())
-        .lte("last_analyzed", end.isoformat())
-        .execute()
-    )
-    return res.count or 0
+def _count_news_between(start: datetime, end: datetime) -> int:
+    """统计 00_news 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    try:
+        # 优先使用 created_at
+        res = (
+            sb.table("00_news")
+            .select("id", count="exact")
+            .gte("created_at", start.isoformat())
+            .lte("created_at", end.isoformat())
+            .execute()
+        )
+        return res.count or 0
+    except Exception:
+        # 回退到使用 publish_time
+        try:
+            res = (
+                sb.table("00_news")
+                .select("id", count="exact")
+                .gte("publish_time", start.isoformat())
+                .lte("publish_time", end.isoformat())
+                .execute()
+            )
+            return res.count or 0
+        except Exception:
+            return 0
 
 # ===================== 辅助逻辑 =====================
 def _calc_trend(curr: int, prev: int) -> Tuple[str, str, Optional[str], float]:
@@ -154,102 +213,65 @@ def _get_latest_date(table: str, time_field: str) -> Optional[datetime]:
 @data_cards_bp.route("/data-cards", methods=["GET"])
 def get_data_cards_latest():
     """
-    KPI 数据卡（最小改动版）：
-    - 每张卡片使用自己的最新日期作为锚点来统计当期与环比
-    - 返回中的 data.date 仍为三表最大时间的那一天（保持兼容）
+    KPI 数据卡：统计最近30天的新增数据
+    - 卡片1（竞品动态）→ 00_competitors_news 表
+    - 卡片2（招标机会）→ 00_opportunity 表
+    - 卡片3（相关论文）→ 00_papers 表
+    - 卡片4（新闻消息）→ 00_news 表
     """
-    period = request.args.get("period", "day")
+    period = request.args.get("period", "day")  # 保持兼容，但实际固定为30天
 
-    # === 各自的锚点时间（可能为 None） ===
-    anchor_news_dt = _get_latest_date(VIEW_NAME, "publish_time")
-    anchor_comp_dt = _get_latest_date("00_competitors", "last_analyzed")
-    anchor_paper_dt = _get_latest_date("00_papers", "published_at")
+    # 使用当前时间作为锚点，统计最近30天和上30天
+    anchor_now = datetime.utcnow()
+    anchor_date = anchor_now.date()
 
-    # 总体 date 仍然返回三表最大时间（兼容原前端）
-    candidates = [d for d in [anchor_news_dt, anchor_comp_dt, anchor_paper_dt] if d]
-    if not candidates:
-        response_data = {
-            "code": 200,
-            "message": "no data found",
-            "data": {"cards": [], "date": None, "period": period}
-        }
-        response = make_response(json.dumps(response_data, ensure_ascii=False, indent=2))
-        response.status_code = 200
-        response.mimetype = 'application/json; charset=utf-8'
-        return response
-    anchor_overall = max(candidates).date()
+    # 计算最近30天的时间窗口
+    cur_end = datetime.combine(anchor_date, datetime.max.time())
+    cur_start = datetime.combine(anchor_date - timedelta(days=29), datetime.min.time())
+    
+    # 计算上30天的时间窗口（用于环比）
+    prev_end = cur_start - timedelta(seconds=1)
+    prev_start = datetime.combine((prev_end.date() - timedelta(days=29)), datetime.min.time())
 
-    # === 不同卡片的时间窗口（按各自锚点） ===
-    def _win(dt_opt):
-        if not dt_opt:
-            return None, None, None, None
-        cur_s, cur_e = _period_window(dt_opt.date(), period)
-        prev_s, prev_e = _previous_window(cur_s, cur_e)
-        return cur_s, cur_e, prev_s, prev_e
+    # === 统计四个表的新增数量 ===
+    # 卡片1：竞品动态（00_competitors_news）
+    competitors_news_curr = _count_competitors_news_between(cur_start, cur_end)
+    competitors_news_prev = _count_competitors_news_between(prev_start, prev_end)
 
-    news_cur_s, news_cur_e, news_prev_s, news_prev_e = _win(anchor_news_dt)
-    comp_cur_s, comp_cur_e, comp_prev_s, comp_prev_e = _win(anchor_comp_dt)
-    paper_cur_s, paper_cur_e, paper_prev_s, paper_prev_e = _win(anchor_paper_dt)
+    # 卡片2：招标机会（00_opportunity）
+    opportunity_curr = _count_opportunity_between(cur_start, cur_end)
+    opportunity_prev = _count_opportunity_between(prev_start, prev_end)
 
-    # === 计数：为空窗口则返回 0 ===
-    news_curr = _count_news_between(news_cur_s, news_cur_e) if news_cur_s else 0
-    news_prev = _count_news_between(news_prev_s, news_prev_e) if news_prev_s else 0
+    # 卡片3：相关论文（00_papers）
+    papers_curr = _count_papers_between(cur_start, cur_end)
+    papers_prev = _count_papers_between(prev_start, prev_end)
 
-    comp_curr = _count_competitors_updated_between(comp_cur_s, comp_cur_e) if comp_cur_s else 0
-    comp_prev = _count_competitors_updated_between(comp_prev_s, comp_prev_e) if comp_prev_s else 0
-
-    papers_curr = _count_papers_between(paper_cur_s, paper_cur_e) if paper_cur_s else 0
-    papers_prev = _count_papers_between(paper_prev_s, paper_prev_e) if paper_prev_s else 0
-
-    # 预警监控：跟随 competitors 的锚点与窗口
-    if comp_cur_s:
-        res = (
-            sb.table("00_competitors")
-            .select("id,product")
-            .gte("last_analyzed", comp_cur_s.isoformat())
-            .lte("last_analyzed", comp_cur_e.isoformat())
-            .execute()
-        )
-        alert_kw = ["原子力", "强磁场", "探针台", "克尔"]
-        alerts_curr = sum(1 for r in (res.data or []) if any(k in (r.get("product") or "") for k in alert_kw))
-    else:
-        alerts_curr = 0
-
-    if comp_prev_s:
-        res_prev = (
-            sb.table("00_competitors")
-            .select("id,product")
-            .gte("last_analyzed", comp_prev_s.isoformat())
-            .lte("last_analyzed", comp_prev_e.isoformat())
-            .execute()
-        )
-        alert_kw = ["原子力", "强磁场", "探针台", "克尔"]
-        alerts_prev = sum(1 for r in (res_prev.data or []) if any(k in (r.get("product") or "") for k in alert_kw))
-    else:
-        alerts_prev = 0
+    # 卡片4：新闻消息（00_news）
+    news_curr = _count_news_between(cur_start, cur_end)
+    news_prev = _count_news_between(prev_start, prev_end)
 
     # === 环比趋势（带限幅） ===
-    t1, txt1, icon1, _ = _calc_trend(news_curr, news_prev)
-    t2, txt2, icon2, _ = _calc_trend(comp_curr, comp_prev)
+    t1, txt1, icon1, _ = _calc_trend(competitors_news_curr, competitors_news_prev)
+    t2, txt2, icon2, _ = _calc_trend(opportunity_curr, opportunity_prev)
     t3, txt3, icon3, _ = _calc_trend(papers_curr, papers_prev)
-    t4, txt4, icon4, _ = _calc_trend(alerts_curr, alerts_prev)
+    t4, txt4, icon4, _ = _calc_trend(news_curr, news_prev)
 
-    # === 组装结果（保持原结构不变） ===
+    # === 组装结果 ===
     cards = [
         {
             "id": 1,
             "label": "竞品动态",
-            "value": f"{'+' if news_curr > 0 else ''}{news_curr} 条",
+            "value": f"{'+' if competitors_news_curr > 0 else ''}{competitors_news_curr} 条",
             "trend": {"type": t1, "text": txt1, "icon": icon1},
-            "progress": _progress_from_value(news_curr, 100),
+            "progress": _progress_from_value(competitors_news_curr, 100),
             "icon": {"class": "form", "color": "blue"},
         },
         {
             "id": 2,
             "label": "招标机会",
-            "value": f"{comp_curr} 条",
+            "value": f"{opportunity_curr} 条",
             "trend": {"type": t2, "text": txt2, "icon": icon2},
-            "progress": _progress_from_value(comp_curr, 30),
+            "progress": _progress_from_value(opportunity_curr, 30),
             "icon": {"class": "user", "color": "green"},
         },
         {
@@ -263,9 +285,9 @@ def get_data_cards_latest():
         {
             "id": 4,
             "label": "新闻消息",
-            "value": f"{alerts_curr} 个",
+            "value": f"{news_curr} 个",
             "trend": {"type": t4, "text": txt4, "icon": icon4},
-            "progress": _progress_from_value(alerts_curr, 10),
+            "progress": _progress_from_value(news_curr, 10),
             "icon": {"class": "eye", "color": "red"},
         },
     ]
@@ -273,7 +295,7 @@ def get_data_cards_latest():
     response_data = {
         "code": 200,
         "message": "success",
-        "data": {"date": anchor_overall.isoformat(), "period": period, "cards": cards}
+        "data": {"date": anchor_date.isoformat(), "period": period, "cards": cards}
     }
     response = make_response(json.dumps(response_data, ensure_ascii=False, indent=2))
     response.status_code = 200
@@ -301,35 +323,27 @@ def _daily_points(start: datetime, end: datetime, counter_fn) -> List[Dict]:
 
 @data_cards_bp.route("/data-cards/trend", methods=["GET"])
 def get_data_cards_trend():
-    """趋势数据接口（自动取最近一周数据）"""
+    """趋势数据接口（自动取最近30天数据）"""
     card_id = int(request.args.get("cardId", 1))
     period = request.args.get("period", "week")
 
     end_d = datetime.utcnow().date()
-    start_d = end_d - timedelta(days=6)
+    start_d = end_d - timedelta(days=29)  # 最近30天
     start = datetime.combine(start_d, datetime.min.time())
     end = datetime.combine(end_d, datetime.max.time())
 
     if card_id == 1:
-        pts = _daily_points(start, end, _count_news_between)
+        # 卡片1：竞品动态（00_competitors_news）
+        pts = _daily_points(start, end, _count_competitors_news_between)
     elif card_id == 2:
-        pts = _daily_points(start, end, _count_competitors_updated_between)
+        # 卡片2：招标机会（00_opportunity）
+        pts = _daily_points(start, end, _count_opportunity_between)
     elif card_id == 3:
+        # 卡片3：相关论文（00_papers）
         pts = _daily_points(start, end, _count_papers_between)
     elif card_id == 4:
-        def _count_alert(ds, de):
-            r = (
-                sb.table("00_competitors")
-                .select("id,product")
-                .gte("last_analyzed", ds.isoformat())
-                .lte("last_analyzed", de.isoformat())
-                .execute()
-            )
-            return sum(
-                1 for row in (r.data or [])
-                if any(k in (row.get("product") or "") for k in ["原子力", "强磁场", "探针台", "克尔"])
-            )
-        pts = _daily_points(start, end, _count_alert)
+        # 卡片4：新闻消息（00_news）
+        pts = _daily_points(start, end, _count_news_between)
     else:
         error_data = {"code": 400, "message": "invalid cardId", "data": {}}
         response = make_response(
