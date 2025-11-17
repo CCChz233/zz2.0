@@ -11,7 +11,7 @@ KPI 概览接口 Blueprint（自动取数据库中最新数据日期）
   /api/dashboard/data-cards/trend
 """
 
-from flask import Blueprint, jsonify, request, make_response
+from flask import Blueprint, request, make_response
 from supabase import create_client, Client
 from datetime import datetime, timedelta, date as date_cls
 from typing import Dict, Tuple, List, Optional
@@ -28,19 +28,13 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("❌ 环境变量 SUPABASE_URL / SUPABASE_SERVICE_KEY 未配置。")
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-VIEW_NAME = "news_feed_ready_view"
 
 # ===================== 工具函数 =====================
-def _parse_date_arg(d: Optional[str]) -> date_cls:
-    if not d:
-        return datetime.utcnow().date()
-    return datetime.fromisoformat(d).date()
-
 def _period_window(anchor: date_cls, period: str) -> Tuple[datetime, datetime]:
-    """计算当前周期的起止时间（固定为最近30天）"""
-    # 固定使用30天窗口
+    """计算当前周期的起止时间（固定为最近1天）"""
+    # 固定使用1天窗口
     end = datetime.combine(anchor, datetime.max.time())
-    start = datetime.combine(anchor - timedelta(days=29), datetime.min.time())
+    start = datetime.combine(anchor - timedelta(days=0), datetime.min.time())
     return start, end
 
 def _previous_window(start: datetime, end: datetime) -> Tuple[datetime, datetime]:
@@ -180,58 +174,30 @@ def _progress_from_value(v: int, soft_target: int) -> int:
         return 0
     return max(0, min(100, int(round(v * 100.0 / soft_target))))
 
-def _get_latest_date(table: str, time_field: str) -> Optional[datetime]:
-    """从 Supabase 获取表中最新时间字段，并去掉时区信息"""
-    res = (
-        sb.table(table)
-        .select(time_field)
-        .order(time_field, desc=True)
-        .limit(1)
-        .execute()
-    )
-    if res.data and res.data[0].get(time_field):
-        t = res.data[0][time_field]
-        try:
-            # 兼容三种情况：带Z、带+00:00、不带时区
-            if isinstance(t, str):
-                t = t.replace("Z", "+00:00") if t.endswith("Z") else t
-                dt = datetime.fromisoformat(t)
-            else:
-                dt = t
-
-            # 如果带 tzinfo（offset-aware），统一转成 UTC，再去 tzinfo
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(tz=None).replace(tzinfo=None)
-            return dt
-        except Exception as e:
-            print(f"[WARN] parse time error in {table}.{time_field}: {e}")
-            return None
-    return None
-
 
 # ===================== KPI 主接口 =====================
 @data_cards_bp.route("/data-cards", methods=["GET"])
 def get_data_cards_latest():
     """
-    KPI 数据卡：统计最近30天的新增数据
+    KPI 数据卡：统计最近1天的新增数据
     - 卡片1（竞品动态）→ 00_competitors_news 表
     - 卡片2（招标机会）→ 00_opportunity 表
     - 卡片3（相关论文）→ 00_papers 表
     - 卡片4（新闻消息）→ 00_news 表
     """
-    period = request.args.get("period", "day")  # 保持兼容，但实际固定为30天
+    period = request.args.get("period", "day")  # 保持兼容，但实际固定为1天
 
-    # 使用当前时间作为锚点，统计最近30天和上30天
+    # 使用当前时间作为锚点，统计最近1天和上1天
     anchor_now = datetime.utcnow()
     anchor_date = anchor_now.date()
 
-    # 计算最近30天的时间窗口
+    # 计算最近1天的时间窗口
     cur_end = datetime.combine(anchor_date, datetime.max.time())
-    cur_start = datetime.combine(anchor_date - timedelta(days=29), datetime.min.time())
-    
-    # 计算上30天的时间窗口（用于环比）
+    cur_start = datetime.combine(anchor_date - timedelta(days=0), datetime.min.time())
+
+    # 计算上1天的时间窗口（用于环比）
     prev_end = cur_start - timedelta(seconds=1)
-    prev_start = datetime.combine((prev_end.date() - timedelta(days=29)), datetime.min.time())
+    prev_start = datetime.combine((prev_end.date() - timedelta(days=0)), datetime.min.time())
 
     # === 统计四个表的新增数量 ===
     # 卡片1：竞品动态（00_competitors_news）
@@ -323,12 +289,12 @@ def _daily_points(start: datetime, end: datetime, counter_fn) -> List[Dict]:
 
 @data_cards_bp.route("/data-cards/trend", methods=["GET"])
 def get_data_cards_trend():
-    """趋势数据接口（自动取最近30天数据）"""
+    """趋势数据接口（自动取最近1天数据）"""
     card_id = int(request.args.get("cardId", 1))
     period = request.args.get("period", "week")
 
     end_d = datetime.utcnow().date()
-    start_d = end_d - timedelta(days=29)  # 最近30天
+    start_d = end_d - timedelta(days=0)  # 最近1天
     start = datetime.combine(start_d, datetime.min.time())
     end = datetime.combine(end_d, datetime.max.time())
 
