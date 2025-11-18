@@ -155,29 +155,40 @@ def _default_line_chart(name: str, color: str, months: int = 12) -> Dict[str, An
 
 def _default_day_chart(name: str, color: str, days: int = 7) -> Dict[str, Any]:
     """
-    生成带默认模拟数据的日统计折线图（带真实波动）。
+    生成带默认模拟数据的日统计折线图（高度随机波动）。
     """
     import random
     from datetime import datetime, timedelta
     anchor = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     labels = []
     data = []
-    # 使用累积随机变化，模拟真实波动
-    current_value = random.randint(1, 3)  # 起始值
+    # 使用更随机的波动模式
+    current_value = random.randint(0, 4)  # 起始值
     for i in range(days):
         start = anchor - timedelta(days=days - i - 1)
         labels.append(f"{start.month}月{start.day}日")
-        # 有60%概率上升，40%概率下降
-        if random.random() < 0.6:
-            # 上升：增加0-2之间的随机值
-            change = random.randint(0, 2)
+        
+        # 15%概率出现大幅波动
+        if random.random() < 0.15:
+            if random.random() < 0.6:
+                change = random.randint(3, 6)  # 大幅上升
+            else:
+                change = -random.randint(2, 5)  # 大幅下降
         else:
-            # 下降：减少0-2之间的随机值
-            change = -random.randint(0, 2)
-        # 添加随机噪声（-1到+1）
-        noise = random.randint(-1, 1)
+            # 正常波动：完全随机
+            direction = random.choice([-1, -1, 1, 1, 1])
+            magnitude = random.randint(0, 3)
+            change = direction * magnitude
+        
+        # 随机噪声（-2到+2）
+        noise = random.randint(-2, 2)
+        # 20%概率额外波动
+        if random.random() < 0.2:
+            noise += random.randint(-2, 2)
+        
         current_value = max(0, current_value + change + noise)
         data.append(int(current_value))
+    
     return {
         "xAxisData": labels,
         "seriesData": [
@@ -497,41 +508,37 @@ def _load_competitor_names(ids: Sequence[str]) -> Dict[str, str]:
 
 
 def _news_statistics_default(months: int) -> Dict[str, Any]:
-    """新闻统计：生成默认模拟数据（带真实波动）"""
+    """新闻统计：生成默认模拟数据（有趋势的真实感数据）"""
     import random
+    import math
+    
     labels = [f"{i}月" for i in range(1, months + 1)]
     
-    # 政策新闻：使用累积随机变化，模拟真实波动
+    # 政策新闻：稳定上升趋势，波动较小
     policy_data = []
-    current_value = random.randint(6, 12)  # 起始值
+    base_policy = 12
     for i in range(months):
-        # 有70%概率上升，30%概率下降，但整体趋势向上
-        if random.random() < 0.7:
-            # 上升：增加1-6之间的随机值
-            change = random.randint(1, 6)
-        else:
-            # 下降：减少1-4之间的随机值
-            change = -random.randint(1, 4)
-        # 添加额外的随机波动（-3到+3）
-        noise = random.randint(-3, 3)
-        current_value = max(4, current_value + change + noise)
-        policy_data.append(int(current_value))
+        # 上升趋势 + 小幅波动
+        trend_value = base_policy + i * 0.8
+        # 使用正弦波增加平滑感
+        wave = math.sin(i * math.pi / 4) * 2
+        noise = random.uniform(-3, 3)
+        value = trend_value + wave + noise
+        policy_data.append(max(5, min(30, int(round(value)))))
     
-    # 行业新闻：波动更大，体现行业活跃度
+    # 行业新闻：波动较大，整体上升
     industry_data = []
-    current_value = random.randint(10, 18)  # 起始值
+    base_industry = 18
     for i in range(months):
-        # 有65%概率上升，35%概率下降
-        if random.random() < 0.65:
-            # 上升：增加1-8之间的随机值
-            change = random.randint(1, 8)
-        else:
-            # 下降：减少1-6之间的随机值
-            change = -random.randint(1, 6)
-        # 添加较大的随机波动（-5到+5）
-        noise = random.randint(-5, 5)
-        current_value = max(6, current_value + change + noise)
-        industry_data.append(int(current_value))
+        # 上升趋势 + 较大波动
+        trend_value = base_industry + i * 1.2
+        wave = math.sin(i * math.pi / 3) * 4
+        noise = random.uniform(-5, 5)
+        # 偶尔有较大波动
+        if random.random() < 0.15:
+            noise *= 1.8
+        value = trend_value + wave + noise
+        industry_data.append(max(8, min(40, int(round(value)))))
     
     return {
         "policyNews": {
@@ -558,8 +565,10 @@ def _news_statistics_default(months: int) -> Dict[str, Any]:
 
 
 def _news_statistics(months: int) -> Dict[str, Any]:
-    """新闻统计：使用数据库查询（00_news 表）"""
-    # 新闻部分始终使用数据库，不受 USE_DEFAULT_DATA 开关影响
+    """新闻统计：根据开关选择使用模拟数据或查询数据库"""
+    if USE_DEFAULT_DATA:
+        return _news_statistics_default(months)
+    
     # 数据库统计模式
     buckets = _month_buckets(months)
     labels = [label for label, _, _ in buckets]
@@ -628,42 +637,62 @@ def _news_statistics(months: int) -> Dict[str, Any]:
 
 
 def _competitor_statistics_default(months: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """竞品统计：生成默认模拟数据（带真实波动）"""
+    """竞品统计：生成默认模拟数据（有趋势的真实感数据）"""
     import random
+    import math
+    
     labels = [f"{i}月" for i in range(1, months + 1)]
     
-    # 生成3条竞品趋势线，每条有不同的波动模式
+    # 生成3条竞品趋势线，每条有不同的特征
+    competitor_configs = [
+        {"base": 8, "trend": 0.5, "volatility": 3, "pattern": "steady"},  # 竞品1：稳定
+        {"base": 12, "trend": 0.8, "volatility": 4, "pattern": "rising"},  # 竞品2：上升
+        {"base": 6, "trend": 1.2, "volatility": 5, "pattern": "volatile_rising"},  # 竞品3：波动上升
+    ]
+    
     trend_series = []
-    for idx in range(3):
-        # 每条线有不同的起始值和波动特性
-        current_value = random.randint(2 + idx * 2, 5 + idx * 2)
+    for idx, config in enumerate(competitor_configs):
         data = []
         for i in range(months):
-            # 每条线有不同的上升概率（60%-75%）
-            up_prob = 0.6 + idx * 0.05
-            if random.random() < up_prob:
-                # 上升：增加0-4之间的随机值
-                change = random.randint(0, 4)
+            if config["pattern"] == "steady":
+                # 稳定波动
+                center = config["base"]
+                wave = math.sin(i * math.pi / 3) * config["volatility"]
+                noise = random.uniform(-config["volatility"] * 0.5, config["volatility"] * 0.5)
+                value = center + wave + noise
+            elif config["pattern"] == "rising":
+                # 稳定上升
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                value = current + noise
+            elif config["pattern"] == "volatile_rising":
+                # 波动上升
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                if random.random() < 0.25:
+                    noise *= 1.8
+                value = current + noise
             else:
-                # 下降：减少0-3之间的随机值
-                change = -random.randint(0, 3)
-            # 添加随机噪声（-2到+3）
-            noise = random.randint(-2, 3)
-            current_value = max(1, current_value + change + noise)
-            data.append(int(current_value))
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                value = current + noise
+            
+            value = max(2, min(25, int(round(value))))
+            data.append(int(value))
+        
         trend_series.append({
             "name": f"竞品{idx + 1}",
             "data": data,
             "color": COMPETITOR_COLORS[idx % len(COMPETITOR_COLORS)],
         })
     
-    # 生成竞品类型饼图数据（5个类型）
+    # 竞品类型饼图数据：生成合理的占比
     type_values = {
-        "融资": random.randint(15, 35),
-        "市场活动": random.randint(18, 40),
-        "技术更新": random.randint(12, 28),
-        "合作签约": random.randint(8, 20),
-        "其他动态": random.randint(5, 15),
+        "融资": random.randint(25, 40),
+        "市场活动": random.randint(28, 45),
+        "技术更新": random.randint(20, 35),
+        "合作签约": random.randint(15, 28),
+        "其他动态": random.randint(10, 20),
     }
     series_data = [{"value": value, "name": name} for name, value in type_values.items()]
     
@@ -748,8 +777,38 @@ def _competitor_statistics(months: int) -> Tuple[Dict[str, Any], List[Dict[str, 
 
 
 def _bid_list_statistics_default(days: int = 7) -> Dict[str, Any]:
-    """招标统计：生成默认模拟数据"""
-    return _default_day_chart("数量", COLOR_BID, days)
+    """招标统计：生成默认模拟数据（有波动的真实感数据）"""
+    import random
+    from datetime import datetime, timedelta
+    
+    anchor = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    labels = []
+    for i in range(days):
+        start = anchor - timedelta(days=days - i - 1)
+        labels.append(f"{start.month}月{start.day}日")
+    
+    # 生成有波动的日统计数据
+    data = []
+    base_value = 4
+    for i in range(days):
+        # 基础值 + 随机波动
+        noise = random.uniform(-2, 3)
+        # 30%概率出现较大值
+        if random.random() < 0.3:
+            noise += random.randint(2, 5)
+        value = base_value + noise
+        data.append(max(0, min(12, int(round(value)))))
+    
+    return {
+        "xAxisData": labels,
+        "seriesData": [
+            {
+                "name": "数量",
+                "data": data,
+                "color": COLOR_BID,
+            }
+        ],
+    }
 
 
 def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
@@ -810,39 +869,131 @@ def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
 
 
 def _research_statistics_default(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """研究统计：生成默认模拟数据（带真实波动）
+    """研究统计：生成默认模拟数据（设计有趋势、有波动的真实感数据）
     返回: (researchTopicNumData, researchTopicData)
     """
     import random
-    labels = [f"{i}月" for i in range(1, months + 1)]
+    import math
     
-    # 生成6条研究主题趋势线，每条有不同的波动模式
+    labels = [f"{i}月" for i in range(1, months + 1)]
     topic_order = ["磁学", "量子", "纳米", "科学仪器", "光谱", "仪器国产化"]
+    
+    # 为每个主题设计不同的趋势特征
+    topic_configs = {
+        "磁学": {
+            "base": 45,  # 起始值
+            "trend": 2.5,  # 每月增长趋势
+            "volatility": 4,  # 波动幅度
+            "pattern": "rising"  # 上升趋势
+        },
+        "量子": {
+            "base": 35,
+            "trend": 3.0,
+            "volatility": 6,
+            "pattern": "rising_volatile"  # 波动上升
+        },
+        "纳米": {
+            "base": 55,
+            "trend": -1.5,  # 先下降
+            "volatility": 5,
+            "pattern": "v_shaped"  # V型（先降后升）
+        },
+        "科学仪器": {
+            "base": 50,
+            "trend": 1.0,
+            "volatility": 8,
+            "pattern": "fluctuating"  # 稳定波动
+        },
+        "光谱": {
+            "base": 60,
+            "trend": 2.8,
+            "volatility": 5,
+            "pattern": "steady_rising"  # 稳定上升
+        },
+        "仪器国产化": {
+            "base": 30,
+            "trend": 4.0,
+            "volatility": 12,
+            "pattern": "volatile_rising"  # 大幅波动上升
+        },
+    }
+    
     trend_series = []
     for idx, topic in enumerate(topic_order):
-        # 每条主题有不同的起始值和波动特性
-        current_value = random.randint(3 + idx, 6 + idx * 2)
+        config = topic_configs.get(topic, {"base": 40, "trend": 2.0, "volatility": 5, "pattern": "rising"})
         data = []
+        current = config["base"]
+        
         for i in range(months):
-            # 不同主题有不同的上升概率（55%-70%）
-            up_prob = 0.55 + idx * 0.025
-            if random.random() < up_prob:
-                # 上升：增加0-3之间的随机值
-                change = random.randint(0, 3)
+            # 根据模式生成数据
+            if config["pattern"] == "rising":
+                # 稳定上升，带小幅波动
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                value = current + noise
+                
+            elif config["pattern"] == "rising_volatile":
+                # 波动上升
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                # 偶尔有较大波动
+                if random.random() < 0.2:
+                    noise *= 1.5
+                value = current + noise
+                
+            elif config["pattern"] == "v_shaped":
+                # V型：前一半下降，后一半上升
+                mid = months / 2
+                if i < mid:
+                    # 前半段：从base下降到最低点
+                    current = config["base"] - (mid - i) * abs(config["trend"])
+                else:
+                    # 后半段：从最低点上升
+                    lowest = config["base"] - mid * abs(config["trend"])
+                    current = lowest + (i - mid) * abs(config["trend"]) * 2.5
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                value = current + noise
+                
+            elif config["pattern"] == "fluctuating":
+                # 稳定波动，围绕中心值
+                center = config["base"] + i * config["trend"]
+                # 使用正弦波增加平滑感
+                wave = math.sin(i * math.pi / 3) * config["volatility"]
+                noise = random.uniform(-config["volatility"] * 0.5, config["volatility"] * 0.5)
+                value = center + wave + noise
+                
+            elif config["pattern"] == "steady_rising":
+                # 稳定上升，波动较小
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"] * 0.6, config["volatility"] * 0.6)
+                value = current + noise
+                
+            elif config["pattern"] == "volatile_rising":
+                # 大幅波动上升
+                current = config["base"] + i * config["trend"]
+                # 更大的波动
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                if random.random() < 0.3:
+                    noise *= random.uniform(1.5, 2.5)  # 偶尔大幅波动
+                value = current + noise
+                
             else:
-                # 下降：减少0-2之间的随机值
-                change = -random.randint(0, 2)
-            # 添加随机噪声（-2到+3）
-            noise = random.randint(-2, 3)
-            current_value = max(2, current_value + change + noise)
-            data.append(int(current_value))
+                # 默认：稳定上升
+                current = config["base"] + i * config["trend"]
+                noise = random.uniform(-config["volatility"], config["volatility"])
+                value = current + noise
+            
+            # 确保值在合理范围内（0-100）
+            value = max(5, min(95, round(value)))
+            data.append(int(value))
+        
         trend_series.append({
             "name": topic,
             "data": data,
             "color": RESEARCH_COLORS[idx % len(RESEARCH_COLORS)],
         })
     
-    # 生成研究主题饼图数据（使用完整名称）
+    # 饼图数据：根据趋势线的平均值生成合理的占比
     topic_mapping = {
         "磁学": "磁学与自旋电子学",
         "量子": "量子与低温测量",
@@ -852,21 +1003,25 @@ def _research_statistics_default(months: int) -> Tuple[Dict[str, Any], Dict[str,
         "仪器国产化": "仪器工程与国产化",
     }
     
-    total = random.randint(50, 150)
-    ratios = [random.random() for _ in range(6)]
-    ratio_sum = sum(ratios)
-    ratios = [r / ratio_sum for r in ratios]
+    # 计算每个主题的平均值作为饼图的基础值
+    topic_avg_values = {}
+    for idx, topic in enumerate(topic_order):
+        avg = sum(trend_series[idx]["data"]) / len(trend_series[idx]["data"])
+        topic_avg_values[topic] = int(avg * 10)  # 放大10倍作为饼图值，让差异更明显
     
-    topic_values = {}
-    for idx, topic_key in enumerate(topic_order):
-        value = max(5, int(total * ratios[idx]))
-        topic_values[topic_mapping[topic_key]] = value
+    # 确保总和在合理范围（300-800），让饼图看起来更真实
+    total = sum(topic_avg_values.values())
+    if total < 300:
+        scale = 400 / total
+        topic_avg_values = {k: int(v * scale) for k, v in topic_avg_values.items()}
+    elif total > 800:
+        scale = 600 / total
+        topic_avg_values = {k: int(v * scale) for k, v in topic_avg_values.items()}
     
-    current_sum = sum(topic_values.values())
-    last_key = topic_mapping[topic_order[-1]]
-    topic_values[last_key] = total - (current_sum - topic_values[last_key])
-    
-    topic_data = [{"value": value, "name": name} for name, value in topic_values.items()]
+    topic_data = [
+        {"value": topic_avg_values[topic_key], "name": topic_mapping[topic_key]}
+        for topic_key in topic_order
+    ]
     
     research_topic_num_data = {"xAxisData": labels, "seriesData": trend_series}
     research_topic_data = {"seriesData": topic_data}
