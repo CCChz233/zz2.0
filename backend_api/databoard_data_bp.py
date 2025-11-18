@@ -155,18 +155,29 @@ def _default_line_chart(name: str, color: str, months: int = 12) -> Dict[str, An
 
 def _default_day_chart(name: str, color: str, days: int = 7) -> Dict[str, Any]:
     """
-    生成带默认模拟数据的日统计折线图。
+    生成带默认模拟数据的日统计折线图（带真实波动）。
     """
     import random
     from datetime import datetime, timedelta
     anchor = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     labels = []
     data = []
+    # 使用累积随机变化，模拟真实波动
+    current_value = random.randint(1, 3)  # 起始值
     for i in range(days):
         start = anchor - timedelta(days=days - i - 1)
         labels.append(f"{start.month}月{start.day}日")
-        # 生成1-3之间的随机数据
-        data.append(random.randint(1, 3))
+        # 有60%概率上升，40%概率下降
+        if random.random() < 0.6:
+            # 上升：增加0-2之间的随机值
+            change = random.randint(0, 2)
+        else:
+            # 下降：减少0-2之间的随机值
+            change = -random.randint(0, 2)
+        # 添加随机噪声（-1到+1）
+        noise = random.randint(-1, 1)
+        current_value = max(0, current_value + change + noise)
+        data.append(int(current_value))
     return {
         "xAxisData": labels,
         "seriesData": [
@@ -486,27 +497,41 @@ def _load_competitor_names(ids: Sequence[str]) -> Dict[str, str]:
 
 
 def _news_statistics_default(months: int) -> Dict[str, Any]:
-    """新闻统计：生成默认模拟数据"""
+    """新闻统计：生成默认模拟数据（带真实波动）"""
     import random
     labels = [f"{i}月" for i in range(1, months + 1)]
     
-    # 政策新闻：从较低值开始，稳定上升趋势，波动较小
+    # 政策新闻：使用累积随机变化，模拟真实波动
     policy_data = []
+    current_value = random.randint(6, 12)  # 起始值
     for i in range(months):
-        # 基础值：从8开始，每月递增约2.5，形成明显上升趋势
-        base_value = 8 + i * 2.5
-        # 添加较小的随机波动（-3到+4），保持趋势稳定
-        value = base_value + random.randint(-3, 4)
-        policy_data.append(max(4, int(value)))
+        # 有70%概率上升，30%概率下降，但整体趋势向上
+        if random.random() < 0.7:
+            # 上升：增加1-6之间的随机值
+            change = random.randint(1, 6)
+        else:
+            # 下降：减少1-4之间的随机值
+            change = -random.randint(1, 4)
+        # 添加额外的随机波动（-3到+3）
+        noise = random.randint(-3, 3)
+        current_value = max(4, current_value + change + noise)
+        policy_data.append(int(current_value))
     
-    # 行业新闻：从稍高值开始，波动更大，体现行业活跃度
+    # 行业新闻：波动更大，体现行业活跃度
     industry_data = []
+    current_value = random.randint(10, 18)  # 起始值
     for i in range(months):
-        # 基础值：从12开始，每月递增约2.2，略低于政策新闻的增长速度
-        base_value = 12 + i * 2.2
-        # 添加较大的随机波动（-4到+6），体现行业新闻的波动性
-        value = base_value + random.randint(-4, 6)
-        industry_data.append(max(6, int(value)))
+        # 有65%概率上升，35%概率下降
+        if random.random() < 0.65:
+            # 上升：增加1-8之间的随机值
+            change = random.randint(1, 8)
+        else:
+            # 下降：减少1-6之间的随机值
+            change = -random.randint(1, 6)
+        # 添加较大的随机波动（-5到+5）
+        noise = random.randint(-5, 5)
+        current_value = max(6, current_value + change + noise)
+        industry_data.append(int(current_value))
     
     return {
         "policyNews": {
@@ -603,16 +628,29 @@ def _news_statistics(months: int) -> Dict[str, Any]:
 
 
 def _competitor_statistics_default(months: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """竞品统计：生成默认模拟数据"""
+    """竞品统计：生成默认模拟数据（带真实波动）"""
     import random
     labels = [f"{i}月" for i in range(1, months + 1)]
     
-    # 生成3条竞品趋势线，每条有不同的基数和趋势
+    # 生成3条竞品趋势线，每条有不同的波动模式
     trend_series = []
     for idx in range(3):
-        base = 3 + idx * 2
-        data = [base + i * 0.8 + random.randint(-2, 3) for i in range(months)]
-        data = [max(1, int(v)) for v in data]
+        # 每条线有不同的起始值和波动特性
+        current_value = random.randint(2 + idx * 2, 5 + idx * 2)
+        data = []
+        for i in range(months):
+            # 每条线有不同的上升概率（60%-75%）
+            up_prob = 0.6 + idx * 0.05
+            if random.random() < up_prob:
+                # 上升：增加0-4之间的随机值
+                change = random.randint(0, 4)
+            else:
+                # 下降：减少0-3之间的随机值
+                change = -random.randint(0, 3)
+            # 添加随机噪声（-2到+3）
+            noise = random.randint(-2, 3)
+            current_value = max(1, current_value + change + noise)
+            data.append(int(current_value))
         trend_series.append({
             "name": f"竞品{idx + 1}",
             "data": data,
@@ -772,19 +810,32 @@ def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
 
 
 def _research_statistics_default(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """研究统计：生成默认模拟数据
+    """研究统计：生成默认模拟数据（带真实波动）
     返回: (researchTopicNumData, researchTopicData)
     """
     import random
     labels = [f"{i}月" for i in range(1, months + 1)]
     
-    # 生成6条研究主题趋势线
+    # 生成6条研究主题趋势线，每条有不同的波动模式
     topic_order = ["磁学", "量子", "纳米", "科学仪器", "光谱", "仪器国产化"]
     trend_series = []
     for idx, topic in enumerate(topic_order):
-        base = 4 + idx * 2
-        data = [base + i * 0.5 + random.randint(-2, 4) for i in range(months)]
-        data = [max(2, int(v)) for v in data]
+        # 每条主题有不同的起始值和波动特性
+        current_value = random.randint(3 + idx, 6 + idx * 2)
+        data = []
+        for i in range(months):
+            # 不同主题有不同的上升概率（55%-70%）
+            up_prob = 0.55 + idx * 0.025
+            if random.random() < up_prob:
+                # 上升：增加0-3之间的随机值
+                change = random.randint(0, 3)
+            else:
+                # 下降：减少0-2之间的随机值
+                change = -random.randint(0, 2)
+            # 添加随机噪声（-2到+3）
+            noise = random.randint(-2, 3)
+            current_value = max(2, current_value + change + noise)
+            data.append(int(current_value))
         trend_series.append({
             "name": topic,
             "data": data,

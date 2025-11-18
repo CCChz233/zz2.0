@@ -31,10 +31,10 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ===================== 工具函数 =====================
 def _period_window(anchor: date_cls, period: str) -> Tuple[datetime, datetime]:
-    """计算当前周期的起止时间（固定为最近1天）"""
-    # 固定使用1天窗口
+    """计算当前周期的起止时间（固定为最近2天）"""
+    # 固定使用2天窗口
     end = datetime.combine(anchor, datetime.max.time())
-    start = datetime.combine(anchor - timedelta(days=0), datetime.min.time())
+    start = datetime.combine(anchor - timedelta(days=1), datetime.min.time())
     return start, end
 
 def _previous_window(start: datetime, end: datetime) -> Tuple[datetime, datetime]:
@@ -45,25 +45,25 @@ def _previous_window(start: datetime, end: datetime) -> Tuple[datetime, datetime
 
 # ===================== 数据统计函数 =====================
 def _count_competitors_news_between(start: datetime, end: datetime) -> int:
-    """统计 00_competitors_news 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    """统计 00_competitors_news 表在指定时间范围内的新增数量（优先使用 publish_time）"""
     try:
-        # 优先使用 created_at，如果没有则使用 publish_time
+        # 优先使用 publish_time，如果没有则使用 created_at
         res = (
             sb.table("00_competitors_news")
             .select("id", count="exact")
-            .gte("created_at", start.isoformat())
-            .lte("created_at", end.isoformat())
+            .gte("publish_time", start.isoformat())
+            .lte("publish_time", end.isoformat())
             .execute()
         )
         return res.count or 0
     except Exception:
-        # 回退到使用 publish_time
+        # 回退到使用 created_at
         try:
             res = (
                 sb.table("00_competitors_news")
                 .select("id", count="exact")
-                .gte("publish_time", start.isoformat())
-                .lte("publish_time", end.isoformat())
+                .gte("created_at", start.isoformat())
+                .lte("created_at", end.isoformat())
                 .execute()
             )
             return res.count or 0
@@ -71,25 +71,25 @@ def _count_competitors_news_between(start: datetime, end: datetime) -> int:
             return 0
 
 def _count_opportunity_between(start: datetime, end: datetime) -> int:
-    """统计 00_opportunity 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    """统计 00_opportunity 表在指定时间范围内的新增数量（优先使用 publish_time）"""
     try:
-        # 优先使用 created_at，如果没有则使用 publish_time
+        # 优先使用 publish_time，如果没有则使用 created_at
         res = (
             sb.table("00_opportunity")
             .select("id", count="exact")
-            .gte("created_at", start.isoformat())
-            .lte("created_at", end.isoformat())
+            .gte("publish_time", start.isoformat())
+            .lte("publish_time", end.isoformat())
             .execute()
         )
         return res.count or 0
     except Exception:
-        # 回退到使用 publish_time
+        # 回退到使用 created_at
         try:
             res = (
                 sb.table("00_opportunity")
                 .select("id", count="exact")
-                .gte("publish_time", start.isoformat())
-                .lte("publish_time", end.isoformat())
+                .gte("created_at", start.isoformat())
+                .lte("created_at", end.isoformat())
                 .execute()
             )
             return res.count or 0
@@ -97,25 +97,25 @@ def _count_opportunity_between(start: datetime, end: datetime) -> int:
             return 0
 
 def _count_papers_between(start: datetime, end: datetime) -> int:
-    """统计 00_papers 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    """统计 00_papers 表在指定时间范围内的新增数量（优先使用 published_at）"""
     try:
-        # 优先使用 created_at
+        # 优先使用 published_at（date 类型）
         res = (
             sb.table("00_papers")
             .select("id", count="exact")
-            .gte("created_at", start.isoformat())
-            .lte("created_at", end.isoformat())
+            .gte("published_at", start.date().isoformat())
+            .lte("published_at", end.date().isoformat())
             .execute()
         )
         return res.count or 0
     except Exception:
-        # 回退到使用 published_at（date 类型）
+        # 回退到使用 created_at
         try:
             res = (
                 sb.table("00_papers")
                 .select("id", count="exact")
-                .gte("published_at", start.date().isoformat())
-                .lte("published_at", end.date().isoformat())
+                .gte("created_at", start.isoformat())
+                .lte("created_at", end.isoformat())
                 .execute()
             )
             return res.count or 0
@@ -123,25 +123,25 @@ def _count_papers_between(start: datetime, end: datetime) -> int:
             return 0
 
 def _count_news_between(start: datetime, end: datetime) -> int:
-    """统计 00_news 表在指定时间范围内的新增数量（优先使用 created_at）"""
+    """统计 00_news 表在指定时间范围内的新增数量（优先使用 publish_time）"""
     try:
-        # 优先使用 created_at
+        # 优先使用 publish_time
         res = (
             sb.table("00_news")
             .select("id", count="exact")
-            .gte("created_at", start.isoformat())
-            .lte("created_at", end.isoformat())
+            .gte("publish_time", start.isoformat())
+            .lte("publish_time", end.isoformat())
             .execute()
         )
         return res.count or 0
     except Exception:
-        # 回退到使用 publish_time
+        # 回退到使用 created_at
         try:
             res = (
                 sb.table("00_news")
                 .select("id", count="exact")
-                .gte("publish_time", start.isoformat())
-                .lte("publish_time", end.isoformat())
+                .gte("created_at", start.isoformat())
+                .lte("created_at", end.isoformat())
                 .execute()
             )
             return res.count or 0
@@ -179,25 +179,25 @@ def _progress_from_value(v: int, soft_target: int) -> int:
 @data_cards_bp.route("/data-cards", methods=["GET"])
 def get_data_cards_latest():
     """
-    KPI 数据卡：统计最近1天的新增数据
+    KPI 数据卡：统计最近2天的新增数据
     - 卡片1（竞品动态）→ 00_competitors_news 表
     - 卡片2（招标机会）→ 00_opportunity 表
     - 卡片3（相关论文）→ 00_papers 表
     - 卡片4（新闻消息）→ 00_news 表
     """
-    period = request.args.get("period", "day")  # 保持兼容，但实际固定为1天
+    period = request.args.get("period", "day")  # 保持兼容，但实际固定为2天
 
-    # 使用当前时间作为锚点，统计最近1天和上1天
+    # 使用当前时间作为锚点，统计最近2天和上2天
     anchor_now = datetime.utcnow()
     anchor_date = anchor_now.date()
 
-    # 计算最近1天的时间窗口
+    # 计算最近2天的时间窗口
     cur_end = datetime.combine(anchor_date, datetime.max.time())
-    cur_start = datetime.combine(anchor_date - timedelta(days=0), datetime.min.time())
+    cur_start = datetime.combine(anchor_date - timedelta(days=1), datetime.min.time())
 
-    # 计算上1天的时间窗口（用于环比）
+    # 计算上2天的时间窗口（用于环比）
     prev_end = cur_start - timedelta(seconds=1)
-    prev_start = datetime.combine((prev_end.date() - timedelta(days=0)), datetime.min.time())
+    prev_start = datetime.combine((prev_end.date() - timedelta(days=1)), datetime.min.time())
 
     # === 统计四个表的新增数量 ===
     # 卡片1：竞品动态（00_competitors_news）
@@ -289,12 +289,12 @@ def _daily_points(start: datetime, end: datetime, counter_fn) -> List[Dict]:
 
 @data_cards_bp.route("/data-cards/trend", methods=["GET"])
 def get_data_cards_trend():
-    """趋势数据接口（自动取最近1天数据）"""
+    """趋势数据接口（自动取最近2天数据）"""
     card_id = int(request.args.get("cardId", 1))
     period = request.args.get("period", "week")
 
     end_d = datetime.utcnow().date()
-    start_d = end_d - timedelta(days=0)  # 最近1天
+    start_d = end_d - timedelta(days=1)  # 最近2天
     start = datetime.combine(start_d, datetime.min.time())
     end = datetime.combine(end_d, datetime.max.time())
 
