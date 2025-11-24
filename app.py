@@ -40,7 +40,7 @@ app.json_encoder = CustomJSONEncoder
 
 # 配置 CORS 解决跨域问题
 CORS(app, 
-     origins=['http://localhost:9528', 'http://127.0.0.1:9528', 'http://localhost:3000', 'http://127.0.0.1:3000'],
+        origins=['http://localhost:9528', 'http://127.0.0.1:9528', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://116.62.34.152:7002'],
      methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
      allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'X-Token'],
      supports_credentials=True)
