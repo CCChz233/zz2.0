@@ -3,3 +3,4 @@ flask_cors
 supabase
 python-dateutil
 gunicorn==21.2.0
+requests

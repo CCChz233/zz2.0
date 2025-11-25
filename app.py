@@ -21,6 +21,7 @@ from backend_api.news_bp import news_bp
 from backend_api.databoard_map_bp import databoard_map_bp
 from backend_api.databoard_data_bp import databoard_data_bp
 from backend_api.agent_report_bp import agent_report_bp, get_agent_initial_report
+from backend_api.agent_chat_bp import agent_chat_bp
 from backend_api.user_bp import user_bp
 
 # 创建Flask应用
@@ -53,6 +54,7 @@ app.register_blueprint(databoard_map_bp, url_prefix='/api/databoard/map')
 app.register_blueprint(databoard_data_bp, url_prefix='/api/databoard/data')
 app.register_blueprint(user_bp, url_prefix='/api')
 app.register_blueprint(agent_report_bp, url_prefix='/api/agent')
+app.register_blueprint(agent_chat_bp, url_prefix='/api/agent')
 
 # 兼容旧路径：/agent/initial-report
 @app.route("/agent/initial-report", methods=["GET"])
@@ -74,7 +76,8 @@ def index():
             "新闻服务: /api/dashboard/news",
             "地图模块: /api/databoard/map",
             "数据模块: /api/databoard/data",
-            "用户认证: /api/user/login, /api/user/info, /api/user/logout"
+            "用户认证: /api/user/login, /api/user/info, /api/user/logout",
+            "智能体聊天: /api/agent/chat, /api/agent/chat/stream"
         ]
     }
 
@@ -93,5 +96,6 @@ if __name__ == "__main__":
     print(f"🗺️ 地图模块: http://127.0.0.1:{port}/api/databoard/map")
     print(f"📊 数据模块: http://127.0.0.1:{port}/api/databoard/data")
     print(f"👤 用户认证: http://127.0.0.1:{port}/api/user/login")
+    print(f"💬 智能体聊天: http://127.0.0.1:{port}/api/agent/chat")
 
     app.run(host="0.0.0.0", port=port, debug=True)
