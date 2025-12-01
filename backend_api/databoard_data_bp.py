@@ -57,6 +57,14 @@ COMPETITOR_NEWS_TABLE = os.getenv("DATABOARD_COMPETITOR_NEWS_TABLE", "00_competi
 COMPETITOR_TABLE = os.getenv("DATABOARD_COMPETITORS_TABLE", "00_competitors")  # 竞品公司表
 PAPER_TABLE = os.getenv("DATABOARD_PAPERS_TABLE", "00_papers")  # 论文表
 OPPORTUNITY_TABLE = os.getenv("DATABOARD_OPPORTUNITY_TABLE", "00_opportunity")  # 招标机会表
+
+# 数据看板统计表（11_系列）- 每个图表对应一个表
+POLICY_NEWS_TABLE = "11_policy_news"      # 政策新闻折线图
+INDUSTRY_NEWS_TABLE = "11_industry_news"  # 行业新闻折线图
+BID_TABLE = "11_bid"                      # 招标柱状图
+COMPETITOR_PIE_TABLE = "11_competitor"    # 竞品饼图
+PAPER_PIE_TABLE = "11_paper_pie"          # 论文饼图
+PAPER_TREND_TABLE = "11_paper_trend"      # 论文趋势多折线图
 MONTHLY_TABLE = os.getenv("DATABOARD_MONTHLY_TABLE", "dashboard_daily_events")
 MONTHLY_EVENT_TYPE = os.getenv("DATABOARD_MONTHLY_EVENT_TYPE", "monthly_summary")
 MONTHLY_EVENT_ORDER = [
@@ -74,13 +82,13 @@ FETCH_MAX_RECORDS = max(FETCH_BATCH_SIZE, int(os.getenv("DATABOARD_FETCH_MAX_REC
 # ===================== 数据模式开关 =====================
 # 数据模式开关：True=使用模拟数据（缺省值模式），False=查询数据库（统计模式）
 # 直接修改这里的值即可切换模式
-USE_DEFAULT_DATA = True  # 改为 False 则使用数据库统计模式
+USE_DEFAULT_DATA = False  # True=模拟数据，False=从11_系列表读取数据
 
 COLOR_POLICY = "#5470c6"
 COLOR_INDUSTRY = "green"
 COLOR_BID = "#d37448"
 COMPETITOR_COLORS = ["#91cc75", "#fac858", "#ee6666", "#73c0de", "#fc8452"]
-RESEARCH_COLORS = ["#5470C6", "#91CC75", "#FAC858", "#EE6666", "#73C0DE", "#3BA272"]
+RESEARCH_COLORS = ["#5470C6", "#91CC75", "#EE6666", "#3BA272"]  # 4个分类的颜色
 COMP_TYPE_ORDER = ["融资", "市场活动", "技术更新", "合作签约", "其他动态"]
 
 # ===================== 工具函数 =====================
@@ -507,6 +515,213 @@ def _load_competitor_names(ids: Sequence[str]) -> Dict[str, str]:
     return mapping
 
 
+# ===================== 从11_系列表读取数据的函数 =====================
+
+def _generate_rolling_months(months: int = 12) -> List[Tuple[int, int, str]]:
+    """
+    生成滚动N个月的年月列表（从当前月份往前推）
+    返回: [(year, month, label), ...]
+    例如当前2024年12月，months=12，返回：
+    [(2024,1,'1月'), (2024,2,'2月'), ..., (2024,12,'12月')]
+    """
+    from datetime import datetime
+    
+    now = datetime.utcnow()
+    result = []
+    
+    for i in range(months - 1, -1, -1):
+        # 计算目标月份
+        target_month = now.month - i
+        target_year = now.year
+        
+        while target_month <= 0:
+            target_month += 12
+            target_year -= 1
+        
+        label = f"{target_month}月"
+        result.append((target_year, target_month, label))
+    
+    return result
+
+
+def _fetch_news_from_table(months: int = 12) -> Dict[str, Any]:
+    """
+    从 11_policy_news 和 11_industry_news 表读取新闻统计数据
+    返回格式与 _news_statistics_default 一致
+    """
+    rolling_months = _generate_rolling_months(months)
+    labels = [label for _, _, label in rolling_months]
+    
+    # 查询政策新闻
+    try:
+        policy_rows = sb.table(POLICY_NEWS_TABLE).select("year, month, value").execute().data
+    except Exception as e:
+        print(f"[ERROR] _fetch_news_from_table policy: {e}")
+        policy_rows = []
+    
+    # 查询行业新闻
+    try:
+        industry_rows = sb.table(INDUSTRY_NEWS_TABLE).select("year, month, value").execute().data
+    except Exception as e:
+        print(f"[ERROR] _fetch_news_from_table industry: {e}")
+        industry_rows = []
+    
+    # 构建 {(year, month): value} 映射
+    policy_map = {(r.get("year"), r.get("month")): r.get("value", 0) for r in policy_rows}
+    industry_map = {(r.get("year"), r.get("month")): r.get("value", 0) for r in industry_rows}
+    
+    # 按顺序取值
+    policy_data = [policy_map.get((y, m), 0) for y, m, _ in rolling_months]
+    industry_data = [industry_map.get((y, m), 0) for y, m, _ in rolling_months]
+    
+    return {
+        "policyNews": {
+            "xAxisData": labels,
+            "seriesData": [
+                {
+                    "name": "政策新闻",
+                    "data": policy_data,
+                    "color": COLOR_POLICY,
+                }
+            ],
+        },
+        "industryNews": {
+            "xAxisData": labels,
+            "seriesData": [
+                {
+                    "name": "行业新闻",
+                    "data": industry_data,
+                    "color": COLOR_INDUSTRY,
+                }
+            ],
+        },
+    }
+
+
+def _fetch_bid_from_table(months: int = 6) -> Dict[str, Any]:
+    """
+    从 11_bid 表读取招标统计数据
+    返回格式与 _bid_list_statistics_monthly_default 一致
+    """
+    rolling_months = _generate_rolling_months(months)
+    labels = [label for _, _, label in rolling_months]
+    
+    # 查询数据库
+    try:
+        rows = sb.table(BID_TABLE).select("year, month, value").execute().data
+    except Exception as e:
+        print(f"[ERROR] _fetch_bid_from_table: {e}")
+        rows = []
+    
+    # 构建 {(year, month): value} 映射
+    data_map = {(r.get("year"), r.get("month")): r.get("value", 0) for r in rows}
+    
+    # 按顺序取值
+    bid_data = [data_map.get((y, m), 0) for y, m, _ in rolling_months]
+    
+    return {
+        "xAxisData": labels,
+        "seriesData": [
+            {
+                "name": "招标数量",
+                "data": bid_data,
+                "color": COLOR_BID,
+            }
+        ],
+    }
+
+
+def _fetch_competitor_from_table(year: int = None) -> List[Dict[str, Any]]:
+    """
+    从 11_competitor 表读取竞品动态类型数据（饼图）
+    返回格式与竞品统计的饼图部分一致
+    """
+    from datetime import datetime
+    
+    if year is None:
+        year = datetime.utcnow().year
+    
+    # 查询数据库
+    try:
+        rows = sb.table(COMPETITOR_PIE_TABLE).select("category, value").eq("year", year).execute().data
+    except Exception as e:
+        print(f"[ERROR] _fetch_competitor_from_table: {e}")
+        rows = []
+    
+    # 构建饼图数据
+    series_data = [{"value": r.get("value", 0), "name": r.get("category", "")} for r in rows]
+    
+    # 如果没有数据，返回默认值
+    if not series_data:
+        series_data = [
+            {"value": 420, "name": "融资"},
+            {"value": 380, "name": "产品发布"},
+            {"value": 290, "name": "合作"},
+            {"value": 180, "name": "技术更新"},
+        ]
+    
+    return [{"seriesData": series_data}]
+
+
+def _fetch_paper_from_table(months: int = 12) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    从 11_paper_trend 和 11_paper_pie 表读取论文统计数据
+    返回: (researchTopicNumData, researchTopicData)
+    """
+    from datetime import datetime
+    
+    rolling_months = _generate_rolling_months(months)
+    labels = [label for _, _, label in rolling_months]
+    year = datetime.utcnow().year
+    
+    # 4个主题
+    topic_order = ["磁学与量子", "纳米与光谱", "科学仪器", "仪器国产化"]
+    
+    # 从 11_paper_trend 表查询趋势数据
+    try:
+        trend_rows = sb.table(PAPER_TREND_TABLE).select("year, month, category, value").execute().data
+    except Exception as e:
+        print(f"[ERROR] _fetch_paper_from_table trend: {e}")
+        trend_rows = []
+    
+    # 从 11_paper_pie 表查询饼图数据
+    try:
+        pie_rows = sb.table(PAPER_PIE_TABLE).select("category, value").eq("year", year).execute().data
+    except Exception as e:
+        print(f"[ERROR] _fetch_paper_from_table pie: {e}")
+        pie_rows = []
+    
+    # 构建趋势数据映射 {(year, month, category): value}
+    trend_map = {}
+    for r in trend_rows:
+        key = (r.get("year"), r.get("month"), r.get("category"))
+        trend_map[key] = r.get("value", 0)
+    
+    # 构建趋势线数据
+    trend_series = []
+    for idx, topic in enumerate(topic_order):
+        data = [trend_map.get((y, m, topic), 0) for y, m, _ in rolling_months]
+        trend_series.append({
+            "name": topic,
+            "data": data,
+            "color": RESEARCH_COLORS[idx % len(RESEARCH_COLORS)],
+        })
+    
+    # 构建饼图数据
+    pie_map = {r.get("category"): r.get("value", 0) for r in pie_rows}
+    pie_data = [{"value": pie_map.get(topic, 0), "name": topic} for topic in topic_order]
+    
+    # 如果饼图没有数据，使用趋势数据的总和
+    if not any(item["value"] > 0 for item in pie_data):
+        for idx, topic in enumerate(topic_order):
+            pie_data[idx]["value"] = sum(trend_series[idx]["data"])
+    
+    research_topic_num_data = {"xAxisData": labels, "seriesData": trend_series}
+    research_topic_data = {"seriesData": pie_data}
+    
+    return research_topic_num_data, research_topic_data
+
+
 def _news_statistics_default(months: int) -> Dict[str, Any]:
     """新闻统计：生成默认模拟数据（有趋势的真实感数据）"""
     import random
@@ -569,6 +784,12 @@ def _news_statistics(months: int) -> Dict[str, Any]:
     if USE_DEFAULT_DATA:
         return _news_statistics_default(months)
     
+    # 从 11_news_monthly 表读取预计算的统计数据
+    return _fetch_news_from_table(months)
+
+
+def _news_statistics_from_raw(months: int) -> Dict[str, Any]:
+    """新闻统计：从原始新闻表(00_news)查询统计（备用）"""
     # 数据库统计模式
     buckets = _month_buckets(months)
     labels = [label for label, _, _ in buckets]
@@ -704,6 +925,15 @@ def _competitor_statistics(months: int) -> Tuple[Dict[str, Any], List[Dict[str, 
     if USE_DEFAULT_DATA:
         return _competitor_statistics_default(months)
     
+    # 从 11_competitor_type 表读取饼图数据
+    # 趋势数据暂时返回空（前端目前只用饼图）
+    empty_trend = {"xAxisData": [], "seriesData": []}
+    competitor_type = _fetch_competitor_from_table()
+    return empty_trend, competitor_type
+
+
+def _competitor_statistics_from_raw(months: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """竞品统计：从原始竞品表查询统计（备用）"""
     # 数据库统计模式
     buckets = _month_buckets(months)
     labels = [label for label, _, _ in buckets]
@@ -776,34 +1006,29 @@ def _competitor_statistics(months: int) -> Tuple[Dict[str, Any], List[Dict[str, 
     return {"xAxisData": labels, "seriesData": trend_series}, [{"seriesData": series_data}]
 
 
-def _bid_list_statistics_default(days: int = 7) -> Dict[str, Any]:
-    """招标统计：生成默认模拟数据（有波动的真实感数据）"""
+def _bid_list_statistics_monthly_default(months: int = 6) -> Dict[str, Any]:
+    """招标统计：生成默认模拟数据（按月统计，有波动的真实感数据）"""
     import random
-    from datetime import datetime, timedelta
     
-    anchor = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    labels = []
-    for i in range(days):
-        start = anchor - timedelta(days=days - i - 1)
-        labels.append(f"{start.month}月{start.day}日")
+    labels = [f"{i}月" for i in range(1, months + 1)]
     
-    # 生成有波动的日统计数据
+    # 生成有波动的月统计数据
     data = []
-    base_value = 4
-    for i in range(days):
+    base_value = 35
+    for i in range(months):
         # 基础值 + 随机波动
-        noise = random.uniform(-2, 3)
+        noise = random.uniform(-10, 15)
         # 30%概率出现较大值
         if random.random() < 0.3:
-            noise += random.randint(2, 5)
+            noise += random.randint(5, 15)
         value = base_value + noise
-        data.append(max(0, min(12, int(round(value)))))
+        data.append(max(15, min(60, int(round(value)))))
     
     return {
         "xAxisData": labels,
         "seriesData": [
             {
-                "name": "数量",
+                "name": "招标数量",
                 "data": data,
                 "color": COLOR_BID,
             }
@@ -811,18 +1036,24 @@ def _bid_list_statistics_default(days: int = 7) -> Dict[str, Any]:
     }
 
 
-def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
-    """招标统计：根据开关选择使用模拟数据或查询数据库"""
+def _bid_list_statistics_monthly(months: int = 6) -> Dict[str, Any]:
+    """招标统计：按月统计，根据开关选择使用模拟数据或查询数据库"""
     if USE_DEFAULT_DATA:
-        return _bid_list_statistics_default(days)
+        return _bid_list_statistics_monthly_default(months)
     
+    # 从 11_bid_monthly 表读取预计算的统计数据
+    return _fetch_bid_from_table(months)
+
+
+def _bid_list_statistics_monthly_from_raw(months: int = 6) -> Dict[str, Any]:
+    """招标统计：从原始招标表(00_opportunity)查询统计（备用）"""
     # 数据库统计模式
-    buckets = _day_buckets(days)
+    buckets = _month_buckets(months)
     labels = [label for label, _, _ in buckets]
     counts = [0] * len(buckets)
     
     if not buckets:
-        return _empty_line_chart("数量", COLOR_BID)
+        return _empty_line_chart("招标数量", COLOR_BID)
 
     start_iso = buckets[0][1].isoformat()
     end_iso = buckets[-1][2].isoformat()
@@ -834,7 +1065,7 @@ def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
             columns="id, publish_time",
             filters=[("gte", "publish_time", start_iso), ("lte", "publish_time", end_iso)],
             order=("publish_time", True),
-            max_records=1000,
+            max_records=2000,
         )
     except Exception:
         try:
@@ -843,7 +1074,7 @@ def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
                 columns="id, publish_time, created_at",
                 filters=[("gte", "created_at", start_iso), ("lte", "created_at", end_iso)],
                 order=("created_at", True),
-                max_records=1000,
+                max_records=2000,
             )
         except Exception:
             pass
@@ -860,7 +1091,7 @@ def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
         "xAxisData": labels,
         "seriesData": [
             {
-                "name": "数量",
+                "name": "招标数量",
                 "data": counts,
                 "color": COLOR_BID,
             }
@@ -871,50 +1102,40 @@ def _bid_list_statistics(days: int = 7) -> Dict[str, Any]:
 def _research_statistics_default(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """研究统计：生成默认模拟数据（设计有趋势、有波动的真实感数据）
     返回: (researchTopicNumData, researchTopicData)
+    4个分类：磁学与量子、纳米与光谱、科学仪器、仪器国产化
     """
     import random
     import math
     
     labels = [f"{i}月" for i in range(1, months + 1)]
-    topic_order = ["磁学", "量子", "纳米", "科学仪器", "光谱", "仪器国产化"]
+    # 4个分类
+    topic_order = ["磁学与量子", "纳米与光谱", "科学仪器", "仪器国产化"]
     
     # 为每个主题设计不同的趋势特征
     topic_configs = {
-        "磁学": {
-            "base": 45,  # 起始值
-            "trend": 2.5,  # 每月增长趋势
-            "volatility": 4,  # 波动幅度
-            "pattern": "rising"  # 上升趋势
+        "磁学与量子": {
+            "base": 80,  # 合并后基数更大
+            "trend": 2.8,
+            "volatility": 8,
+            "pattern": "rising_volatile"
         },
-        "量子": {
-            "base": 35,
-            "trend": 3.0,
-            "volatility": 6,
-            "pattern": "rising_volatile"  # 波动上升
-        },
-        "纳米": {
-            "base": 55,
-            "trend": -1.5,  # 先下降
-            "volatility": 5,
-            "pattern": "v_shaped"  # V型（先降后升）
+        "纳米与光谱": {
+            "base": 115,  # 合并后基数最大
+            "trend": 1.5,
+            "volatility": 10,
+            "pattern": "fluctuating"
         },
         "科学仪器": {
             "base": 50,
             "trend": 1.0,
             "volatility": 8,
-            "pattern": "fluctuating"  # 稳定波动
-        },
-        "光谱": {
-            "base": 60,
-            "trend": 2.8,
-            "volatility": 5,
-            "pattern": "steady_rising"  # 稳定上升
+            "pattern": "fluctuating"
         },
         "仪器国产化": {
             "base": 30,
             "trend": 4.0,
             "volatility": 12,
-            "pattern": "volatile_rising"  # 大幅波动上升
+            "pattern": "volatile_rising"
         },
     }
     
@@ -994,13 +1215,12 @@ def _research_statistics_default(months: int) -> Tuple[Dict[str, Any], Dict[str,
         })
     
     # 饼图数据：根据趋势线的平均值生成合理的占比
+    # 4个分类，折线图和饼图名称一致
     topic_mapping = {
-        "磁学": "磁学与自旋电子学",
-        "量子": "量子与低温测量",
-        "纳米": "纳米与光学成像",
-        "科学仪器": "科学仪器智能化",
-        "光谱": "光谱与分析技术",
-        "仪器国产化": "仪器工程与国产化",
+        "磁学与量子": "磁学与量子",
+        "纳米与光谱": "纳米与光谱",
+        "科学仪器": "科学仪器",
+        "仪器国产化": "仪器国产化",
     }
     
     # 计算每个主题的平均值作为饼图的基础值
@@ -1036,6 +1256,14 @@ def _research_statistics(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if USE_DEFAULT_DATA:
         return _research_statistics_default(months)
     
+    # 从 11_paper_monthly 表读取预计算的统计数据
+    return _fetch_paper_from_table(months)
+
+
+def _research_statistics_from_raw(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """研究统计：从原始论文表(00_papers)查询统计（备用）
+    返回: (researchTopicNumData, researchTopicData)
+    """
     # 数据库统计模式
     buckets = _month_buckets(months)
     labels = [label for label, _, _ in buckets]
@@ -1096,31 +1324,22 @@ def _research_statistics(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 kw_counter[kw] += 1
                 kw_month_map[kw][idx] += 1
 
-    # 根据API文档，研究主题包括：磁学与自旋电子学、量子与低温测量、纳米与光学成像、科学仪器智能化、光谱与分析技术、仪器工程与国产化
-    # researchTopicData 使用完整名称，researchTopicNumData 使用简化名称
+    # 4个分类：磁学与量子、纳米与光谱、科学仪器、仪器国产化
     topic_mapping = {
-        "磁学": {
-            "full_name": "磁学与自旋电子学",
-            "keywords": ["磁学", "自旋电子学", "磁性"],
+        "磁学与量子": {
+            "full_name": "磁学与量子",
+            "keywords": ["磁学", "自旋电子学", "磁性", "量子", "低温测量", "低温"],
         },
-        "量子": {
-            "full_name": "量子与低温测量",
-            "keywords": ["量子", "低温测量", "低温"],
-        },
-        "纳米": {
-            "full_name": "纳米与光学成像",
-            "keywords": ["纳米", "光学成像", "成像"],
+        "纳米与光谱": {
+            "full_name": "纳米与光谱",
+            "keywords": ["纳米", "光学成像", "成像", "光谱", "分析技术", "分析"],
         },
         "科学仪器": {
-            "full_name": "科学仪器智能化",
+            "full_name": "科学仪器",
             "keywords": ["科学仪器", "智能化", "智能"],
         },
-        "光谱": {
-            "full_name": "光谱与分析技术",
-            "keywords": ["光谱", "分析技术", "分析"],
-        },
         "仪器国产化": {
-            "full_name": "仪器工程与国产化",
+            "full_name": "仪器国产化",
             "keywords": ["仪器工程", "国产化", "工程"],
         },
     }
@@ -1151,8 +1370,8 @@ def _research_statistics(months: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             topic_month_map[topic_key] = [0] * len(buckets)
 
     # researchTopicNumData: 各研究主题数量变化（月度趋势）
-    # 根据API文档，使用简化名称：磁学、量子、纳米、科学仪器、光谱、仪器国产化
-    topic_order = ["磁学", "量子", "纳米", "科学仪器", "光谱", "仪器国产化"]
+    # 4个分类
+    topic_order = ["磁学与量子", "纳米与光谱", "科学仪器", "仪器国产化"]
     trend_series: List[Dict[str, Any]] = []
     for idx, topic_key in enumerate(topic_order):
         trend_series.append(
@@ -1197,7 +1416,7 @@ def get_databoard_data():
 
     try:
         news_stats = _news_statistics(news_months)
-        bid_list_data = _bid_list_statistics(7)  # 近一周
+        bid_list_data = _bid_list_statistics_monthly(6)  # 近六个月
         _, competitor_type = _competitor_statistics(trend_months)
         research_topic_num_data, research_topic_data = _research_statistics(trend_months)
 

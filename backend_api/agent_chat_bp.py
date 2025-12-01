@@ -24,10 +24,29 @@ import requests
 from flask import Blueprint, request, make_response, stream_with_context, jsonify
 from supabase import Client, create_client
 
+# 导入配置模块
+from config import build_system_prompt, get_default_options
+
+# 导入 GPT-Researcher 适配器
+from backend_api.gpt_researcher_adapter import (
+    get_gpt_researcher_adapter, 
+    detect_task_type
+)
+
+# 导入 DeepAnalyze 适配器
+from backend_api.deepanalyze_adapter import get_deepanalyze_adapter
+
 # ===== 配置 =====
 QWEN_API_KEY = os.getenv("QWEN_API_KEY", "sk-7cd135dca0834256a58e960048238db3")
 QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-turbo")
+
+# GPT-Researcher 配置
+USE_GPT_RESEARCHER = os.getenv("USE_GPT_RESEARCHER", "true").lower() == "true"
+AUTO_ROUTE_TASKS = os.getenv("AUTO_ROUTE_TASKS", "true").lower() == "true"  # 是否自动路由任务
+
+# DeepAnalyze 配置
+USE_DEEPANALYZE = os.getenv("USE_DEEPANALYZE", "true").lower() == "true"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
 SUPABASE_KEY = os.getenv(
@@ -82,6 +101,96 @@ def _call_qwen_api(messages: List[Dict[str, str]], stream: bool = False, **optio
     response = requests.post(url, headers=headers, json=data, stream=stream, timeout=60)
     response.raise_for_status()
     return response
+
+
+def _call_llm_api(
+    messages: List[Dict[str, str]], 
+    user_message: str = "",
+    stream: bool = False,
+    force_provider: str = None,
+    **options
+):
+    """
+    统一的 LLM API 调用函数，根据任务类型自动选择服务
+    
+    Args:
+        messages: 消息列表
+        user_message: 用户消息（用于任务类型检测）
+        stream: 是否流式响应
+        force_provider: 强制使用指定服务 ('qwen', 'gpt-researcher', 'deepanalyze', 'auto')
+        **options: 其他选项
+    
+    Returns:
+        响应对象或生成器
+    """
+    # 如果强制指定了服务
+    if force_provider == 'gpt-researcher':
+        adapter = get_gpt_researcher_adapter()
+        if stream:
+            return adapter.chat_completions_stream(messages, **options)
+        else:
+            result = adapter.chat_completions(messages, **options)
+            # 转换为 requests.Response 兼容格式
+            class MockResponse:
+                def __init__(self, data):
+                    self._data = data
+                def json(self):
+                    return self._data
+                def raise_for_status(self):
+                    pass
+            return MockResponse(result)
+    
+    if force_provider == 'deepanalyze':
+        adapter = get_deepanalyze_adapter()
+        if stream:
+            return adapter.chat_completions_stream(messages, **options)
+        else:
+            result = adapter.chat_completions(messages, **options)
+            class MockResponse:
+                def __init__(self, data):
+                    self._data = data
+                def json(self):
+                    return self._data
+                def raise_for_status(self):
+                    pass
+            return MockResponse(result)
+    
+    # 自动路由或使用 Qwen
+    if AUTO_ROUTE_TASKS and (USE_GPT_RESEARCHER or USE_DEEPANALYZE) and user_message:
+        task_type = detect_task_type(user_message)
+        if task_type == 'research' and USE_GPT_RESEARCHER:
+            # 研究任务使用 GPT-Researcher
+            adapter = get_gpt_researcher_adapter()
+            if stream:
+                return adapter.chat_completions_stream(messages, **options)
+            else:
+                result = adapter.chat_completions(messages, **options)
+                class MockResponse:
+                    def __init__(self, data):
+                        self._data = data
+                    def json(self):
+                        return self._data
+                    def raise_for_status(self):
+                        pass
+                return MockResponse(result)
+        elif task_type == 'data' and USE_DEEPANALYZE:
+            # 数据分析任务使用 DeepAnalyze
+            adapter = get_deepanalyze_adapter()
+            if stream:
+                return adapter.chat_completions_stream(messages, **options)
+            else:
+                result = adapter.chat_completions(messages, **options)
+                class MockResponse:
+                    def __init__(self, data):
+                        self._data = data
+                    def json(self):
+                        return self._data
+                    def raise_for_status(self):
+                        pass
+                return MockResponse(result)
+    
+    # 默认使用 Qwen
+    return _call_qwen_api(messages, stream=stream, **options)
 
 
 def _save_message(session_id: str, role: str, content: str, message_id: Optional[str] = None):
@@ -164,9 +273,17 @@ def chat():
         data = request.get_json()
         user_message = data.get("message", "").strip()
         session_id = data.get("session_id") or str(uuid.uuid4())
-        system_prompt = data.get("system_prompt", "你是致真智能体，一个友好、专业的AI助手。你可以回答各种问题，提供工作学习上的帮助，还能随时陪伴聊天。请用简洁、友好的语气回复。")
+        
+        # 从配置文件获取系统提示词（不再从前端传递）
+        temporary_prompts = data.get("temporary_prompts", [])  # 前端可以传递临时提示词
+        system_prompt = build_system_prompt(temporary_prompts=temporary_prompts)
+        
         conversation_history = data.get("conversation_history", [])
         options = data.get("options", {})
+        
+        # 合并默认选项
+        default_options = get_default_options()
+        options = {**default_options, **options}
         
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
@@ -184,8 +301,25 @@ def chat():
         # 保存用户消息
         _save_message(session_id, "user", user_message)
         
-        # 调用Qwen API
-        response = _call_qwen_api(messages, stream=False, **options)
+        # 获取任务类型（从前端传递或自动检测）
+        task_type = data.get("task_type", "auto")
+        
+        # 根据 task_type 决定使用哪个服务
+        force_provider = None
+        if task_type == 'research':
+            force_provider = 'gpt-researcher'
+            print(f"🎯 [任务控制] 前端指定使用 GPT-Researcher（研究任务）")
+        elif task_type == 'data':
+            force_provider = 'deepanalyze'
+            print(f"🎯 [任务控制] 前端指定使用 DeepAnalyze（数据分析任务）")
+        elif task_type == 'chat':
+            force_provider = 'qwen'
+            print(f"🎯 [任务控制] 前端指定使用 Qwen（聊天任务）")
+        else:
+            print(f"🎯 [任务控制] 使用自动路由（task_type: {task_type}）")
+        
+        # 调用 LLM API（根据 task_type 选择服务）
+        response = _call_llm_api(messages, user_message=user_message, stream=False, force_provider=force_provider, **options)
         result = response.json()
         
         # 提取AI回复
@@ -241,9 +375,18 @@ def chat_stream():
         data = request.get_json()
         user_message = data.get("message", "").strip()
         session_id = data.get("session_id") or str(uuid.uuid4())
-        system_prompt = data.get("system_prompt", "你是致真智能体，一个友好、专业的AI助手。你可以回答各种问题，提供工作学习上的帮助，还能随时陪伴聊天。请用简洁、友好的语气回复。")
+        
+        # 从配置文件获取系统提示词（不再从前端传递）
+        temporary_prompts = data.get("temporary_prompts", [])  # 前端可以传递临时提示词
+        system_prompt = build_system_prompt(temporary_prompts=temporary_prompts)
+        
         conversation_history = data.get("conversation_history", [])
         options = data.get("options", {})
+        task_type = data.get("task_type", "auto")  # 任务类型：'research' 强制使用 GPT-Researcher, 'chat' 使用 Qwen, 'auto' 自动路由
+        
+        # 合并默认选项
+        default_options = get_default_options()
+        options = {**default_options, **options}
         
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
@@ -268,77 +411,176 @@ def chat_stream():
             ai_message_id = str(uuid.uuid4())
             
             try:
-                # 调用Qwen API（流式）
-                response = _call_qwen_api(messages, stream=True, **options)
+                # 根据 task_type 决定使用哪个服务
+                use_gpt_researcher = False
+                use_deepanalyze = False
+                force_provider = None
+                
+                if task_type == 'research':
+                    # 前端明确指定使用 GPT-Researcher
+                    use_gpt_researcher = True
+                    force_provider = 'gpt-researcher'
+                    print(f"🎯 [任务控制] 前端指定使用 GPT-Researcher（研究任务）")
+                elif task_type == 'data':
+                    # 前端明确指定使用 DeepAnalyze
+                    use_deepanalyze = True
+                    force_provider = 'deepanalyze'
+                    print(f"🎯 [任务控制] 前端指定使用 DeepAnalyze（数据分析任务）")
+                elif task_type == 'chat':
+                    # 前端明确指定使用 Qwen
+                    force_provider = 'qwen'
+                    print(f"🎯 [任务控制] 前端指定使用 Qwen（聊天任务）")
+                elif AUTO_ROUTE_TASKS and (USE_GPT_RESEARCHER or USE_DEEPANALYZE) and user_message:
+                    # 自动路由
+                    detected_task_type = detect_task_type(user_message)
+                    if detected_task_type == 'research' and USE_GPT_RESEARCHER:
+                        use_gpt_researcher = True
+                        print(f"🔍 [任务路由] 自动检测到研究任务，路由到 GPT-Researcher")
+                        print(f"   用户消息: {user_message[:50]}...")
+                    elif detected_task_type == 'data' and USE_DEEPANALYZE:
+                        use_deepanalyze = True
+                        print(f"🔍 [任务路由] 自动检测到数据分析任务，路由到 DeepAnalyze")
+                        print(f"   用户消息: {user_message[:50]}...")
+                    else:
+                        print(f"🔍 [任务路由] 自动检测到{detected_task_type}任务，使用默认服务 (Qwen)")
+                else:
+                    if not AUTO_ROUTE_TASKS:
+                        print(f"🔍 [任务路由] 自动路由已禁用，使用默认服务")
+                    elif not USE_GPT_RESEARCHER and not USE_DEEPANALYZE:
+                        print(f"🔍 [任务路由] GPT-Researcher 和 DeepAnalyze 已禁用，使用默认服务")
                 
                 # 发送初始事件
                 yield f"data: {json.dumps({'type': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
                 
-                # 处理流式响应
-                for line in response.iter_lines():
-                    if not line:
-                        continue
+                if use_gpt_researcher:
+                    # 使用 GPT-Researcher（支持进度显示）
+                    print(f"🚀 [GPT-Researcher] 开始调用研究服务...")
+                    adapter = get_gpt_researcher_adapter()
                     
-                    line_str = line.decode("utf-8")
+                    # 定义进度回调函数（用于发送进度到前端）
+                    progress_queue = []
+                    def progress_callback(progress_data):
+                        """将进度信息添加到队列，稍后通过 SSE 发送"""
+                        progress_queue.append(progress_data)
                     
-                    # 跳过空行和注释行
-                    if not line_str.strip() or line_str.startswith(':'):
-                        continue
-                    
-                    # 移除 "data: " 前缀（如果存在）
-                    if line_str.startswith("data: "):
-                        line_str = line_str[6:]
-                    
-                    # 检查结束标记
-                    if line_str.strip() == "[DONE]" or line_str.strip() == 'data:[DONE]':
-                        break
-                    
-                    try:
-                        chunk_data = json.loads(line_str)
+                    chunk_count = 0
+                    for chunk in adapter.chat_completions_stream(
+                        messages, 
+                        progress_callback=progress_callback,
+                        **options
+                    ):
+                        # 先发送所有累积的进度信息
+                        while progress_queue:
+                            progress_data = progress_queue.pop(0)
+                            progress_json = json.dumps(progress_data, ensure_ascii=False)
+                            yield f"data: {progress_json}\n\n"
                         
-                        # 尝试多种格式解析
-                        content = ""
-                        
-                        # OpenAI兼容格式
-                        if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
-                            delta = chunk_data["choices"][0].get("delta", {})
-                            content = delta.get("content", "")
-                        
-                        # DashScope格式（Qwen可能使用）
-                        elif "output" in chunk_data:
-                            output = chunk_data["output"]
-                            if "choices" in output and len(output["choices"]) > 0:
-                                choice = output["choices"][0]
-                                if "delta" in choice:
-                                    content = choice["delta"].get("content", "")
-                                elif "message" in choice:
-                                    content = choice["message"].get("content", "")
-                                elif "text" in choice:
-                                    content = choice.get("text", "")
-                            elif "text" in output:
-                                content = output.get("text", "")
-                        
-                        # 直接文本格式
-                        elif "text" in chunk_data:
-                            content = chunk_data.get("text", "")
-                        
-                        # 如果找到内容，立即发送
+                        # 处理内容块
+                        content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
                         if content:
                             ai_content += content
-                            # 立即flush，确保实时传输
                             chunk_data = json.dumps({'type': 'chunk', 'content': content}, ensure_ascii=False)
                             yield f"data: {chunk_data}\n\n"
-                            # 调试：打印发送的chunk（仅前几个字符）
-                            if len(ai_content) <= 50:
-                                print(f"📤 发送chunk: {content[:20]}...")
+                            chunk_count += 1
+                            # 只在前几个chunk打印日志，避免日志过多
+                            if chunk_count <= 3:
+                                print(f"📤 [GPT-Researcher] 发送chunk #{chunk_count}: {content[:30]}...")
+                    
+                    # 发送剩余的进度信息
+                    while progress_queue:
+                        progress_data = progress_queue.pop(0)
+                        progress_json = json.dumps(progress_data, ensure_ascii=False)
+                        yield f"data: {progress_json}\n\n"
+                    
+                    print(f"✅ [GPT-Researcher] 完成，共发送 {chunk_count} 个chunks，总长度: {len(ai_content)} 字符")
+                elif use_deepanalyze:
+                    # 使用 DeepAnalyze API（原生流式支持）
+                    print(f"🚀 [DeepAnalyze] 开始调用数据分析服务...")
+                    adapter = get_deepanalyze_adapter()
+                    
+                    chunk_count = 0
+                    for chunk in adapter.chat_completions_stream(messages, **options):
+                        # 处理内容块
+                        content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                        if content:
+                            ai_content += content
+                            chunk_data = json.dumps({'type': 'chunk', 'content': content}, ensure_ascii=False)
+                            yield f"data: {chunk_data}\n\n"
+                            chunk_count += 1
+                            # 只在前几个chunk打印日志，避免日志过多
+                            if chunk_count <= 3:
+                                print(f"📤 [DeepAnalyze] 发送chunk #{chunk_count}: {content[:30]}...")
+                    
+                    print(f"✅ [DeepAnalyze] 完成，共发送 {chunk_count} 个chunks，总长度: {len(ai_content)} 字符")
+                else:
+                    # 使用 Qwen API（真正的流式）
+                    response = _call_llm_api(messages, user_message=user_message, stream=True, force_provider=force_provider, **options)
+                    
+                    # 处理流式响应
+                    for line in response.iter_lines():
+                        if not line:
+                            continue
+                        
+                        line_str = line.decode("utf-8")
+                        
+                        # 跳过空行和注释行
+                        if not line_str.strip() or line_str.startswith(':'):
+                            continue
+                        
+                        # 移除 "data: " 前缀（如果存在）
+                        if line_str.startswith("data: "):
+                            line_str = line_str[6:]
+                        
+                        # 检查结束标记
+                        if line_str.strip() == "[DONE]" or line_str.strip() == 'data:[DONE]':
+                            break
+                        
+                        try:
+                            chunk_data = json.loads(line_str)
                             
-                    except json.JSONDecodeError as e:
-                        # 如果不是JSON格式，可能是纯文本，跳过
-                        print(f"⚠️ 解析流式数据失败: {e}, 行内容: {line_str[:100]}")
-                        continue
-                    except Exception as e:
-                        print(f"⚠️ 处理流式数据出错: {e}")
-                        continue
+                            # 尝试多种格式解析
+                            content = ""
+                            
+                            # OpenAI兼容格式
+                            if "choices" in chunk_data and len(chunk_data["choices"]) > 0:
+                                delta = chunk_data["choices"][0].get("delta", {})
+                                content = delta.get("content", "")
+                            
+                            # DashScope格式（Qwen可能使用）
+                            elif "output" in chunk_data:
+                                output = chunk_data["output"]
+                                if "choices" in output and len(output["choices"]) > 0:
+                                    choice = output["choices"][0]
+                                    if "delta" in choice:
+                                        content = choice["delta"].get("content", "")
+                                    elif "message" in choice:
+                                        content = choice["message"].get("content", "")
+                                    elif "text" in choice:
+                                        content = choice.get("text", "")
+                                elif "text" in output:
+                                    content = output.get("text", "")
+                            
+                            # 直接文本格式
+                            elif "text" in chunk_data:
+                                content = chunk_data.get("text", "")
+                            
+                            # 如果找到内容，立即发送
+                            if content:
+                                ai_content += content
+                                # 立即flush，确保实时传输
+                                chunk_data = json.dumps({'type': 'chunk', 'content': content}, ensure_ascii=False)
+                                yield f"data: {chunk_data}\n\n"
+                                # 调试：打印发送的chunk（仅前几个字符）
+                                if len(ai_content) <= 50:
+                                    print(f"📤 [Qwen] 发送chunk: {content[:20]}...")
+                                
+                        except json.JSONDecodeError as e:
+                            # 如果不是JSON格式，可能是纯文本，跳过
+                            print(f"⚠️ 解析流式数据失败: {e}, 行内容: {line_str[:100]}")
+                            continue
+                        except Exception as e:
+                            print(f"⚠️ 处理流式数据出错: {e}")
+                            continue
                 
                 # 发送完成事件
                 yield f"data: {json.dumps({'type': 'done', 'session_id': session_id}, ensure_ascii=False)}\n\n"

@@ -85,7 +85,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Unified API Service")
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "8000")), help="Port to run the Flask server")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", "5001")), help="Port to run the Flask server")
     args = parser.parse_args()
     port = args.port
 
