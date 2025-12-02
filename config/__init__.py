@@ -20,7 +20,7 @@ _cached_config: Optional[Dict[str, Any]] = None
 def _get_default_config() -> Dict[str, Any]:
     """默认配置"""
     return {
-        "base_system_prompt": "你是致真智能体，一个友好、专业的AI助手。你可以回答各种问题，提供工作学习上的帮助，还能随时陪伴聊天。请用简洁、友好的语气回复。",
+        "base_system_prompt": "你是致真精密仪器公司的智能体助手，专注于为致真精密仪器公司提供专业的业务支持。你的主要职责包括：1) 分析公司相关的业务数据、市场信息、技术趋势；2) 生成与公司产品（精密仪器、半导体测试设备、磁性测量仪器等）相关的研究报告；3) 提供针对公司业务发展的建议和洞察。请始终围绕致真精密仪器公司的业务场景进行回答，用简洁、专业的语气回复。",
         "global_prompts": [],
         "default_options": {
             "temperature": 0.8,
