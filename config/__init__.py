@@ -20,7 +20,11 @@ _cached_config: Optional[Dict[str, Any]] = None
 def _get_default_config() -> Dict[str, Any]:
     """默认配置"""
     return {
-        "base_system_prompt": "你是致真精密仪器公司的智能体助手，专注于为致真精密仪器公司提供专业的业务支持。你的主要职责包括：1) 分析公司相关的业务数据、市场信息、技术趋势；2) 生成与公司产品（精密仪器、半导体测试设备、磁性测量仪器等）相关的研究报告；3) 提供针对公司业务发展的建议和洞察。请始终围绕致真精密仪器公司的业务场景进行回答，用简洁、专业的语气回复。",
+        "base_system_prompt": (
+            "你是一名中立的行业分析助手，可讨论任意公司、事件、机构或市场问题。"
+            "请优先基于提供的数据库证据作答，不得编造时间、事件、公司行为；"
+            "如证据不足，请回复“数据库暂无相关信息”。保持专业、简洁。"
+        ),
         "global_prompts": [],
         "default_options": {
             "temperature": 0.8,
@@ -105,4 +109,3 @@ def reload_config():
     global _cached_config
     _cached_config = None
     return load_prompts_config()
-

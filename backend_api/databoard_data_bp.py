@@ -34,21 +34,12 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from dateutil import parser as dateparser
 from dateutil.relativedelta import relativedelta
 from flask import Blueprint, make_response, request
-from supabase import Client, create_client
+from infra.db import supabase
 
 # ===================== 初始化 =====================
 databoard_data_bp = Blueprint("databoard_data", __name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_SERVICE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s",
-)
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("❌ 环境变量 SUPABASE_URL / SUPABASE_SERVICE_KEY 未配置。")
-
-sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+sb = supabase
 
 # ===================== 配置常量 =====================
 # 根据实际表结构配置
@@ -1411,8 +1402,12 @@ def get_databoard_data():
       newsMonths: int [3,24]   默认为 DATABOARD_NEWS_MONTHS（12）
       trendMonths: int [3,12]  默认为 DATABOARD_TREND_MONTHS（6）
     """
+    if not sb:
+        return _json_err(500, "Supabase 未配置", http_status=500)
+
     news_months = _safe_int(request.args.get("newsMonths"), DEFAULT_NEWS_MONTHS, 3, 24)
     trend_months = _safe_int(request.args.get("trendMonths"), DEFAULT_TREND_MONTHS, 3, 12)
+    print("[INFO] get_databoard_data: newsMonths =", news_months, ", trendMonths =", trend_months)
 
     try:
         news_stats = _news_statistics(news_months)
@@ -1450,6 +1445,9 @@ def get_monthly_summary():
     返回 Dashboard 月度综合总结（四类各一条）。
     默认视角 management，可通过 ?view=xxx 指定。
     """
+    if not sb:
+        return _json_err(500, "Supabase 未配置", http_status=500)
+
     view = (request.args.get("view") or "management").strip() or "management"
     try:
         items = _fetch_monthly_summaries(view)

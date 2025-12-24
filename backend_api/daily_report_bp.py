@@ -23,7 +23,8 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from flask import Blueprint, request, make_response
 from dateutil import parser as dateparser
-from supabase import create_client
+
+from infra.db import supabase
 
 # ========= 常量 & 配置 =========
 ALLOWED_VIEWS = {"management", "market", "sales", "product"}
@@ -37,18 +38,12 @@ MONTHLY_EVENT_ORDER = [
     ("monthly-科技论文", "科技论文"),
 ]
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY")
-
 # 为了保持与同事版行为一致，保留“内存视角”（生产建议改为无状态或落库/Redis）
 CURRENT_VIEW = {"view": DEFAULT_VIEW}
 
 # ========= 初始化 =========
 daily_report_bp = Blueprint('daily_report', __name__)
-sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+sb = supabase
 
 # ========= 工具函数 =========
 def to_iso_utc(dt: datetime) -> str:
@@ -237,6 +232,9 @@ def get_daily_report():
     入参: view(可选: management/market/sales/product)
     出参: 固定四条月度汇总摘要
     """
+    if not sb:
+        return _json_err(500, "Supabase 未配置", http_status=500)
+
     view = (request.args.get("view") or CURRENT_VIEW["view"]).strip()
     if view not in ALLOWED_VIEWS:
         view = DEFAULT_VIEW
@@ -264,6 +262,9 @@ def get_monthly_report():
     """
     返回按类别合并的大模型月度汇总（四条）。
     """
+    if not sb:
+        return _json_err(500, "Supabase 未配置", http_status=500)
+
     view = (request.args.get("view") or CURRENT_VIEW["view"]).strip()
     if view not in ALLOWED_VIEWS:
         view = DEFAULT_VIEW

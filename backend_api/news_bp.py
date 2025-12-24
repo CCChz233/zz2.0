@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Flask 后端：新闻 API Blueprint（基于视图 news_feed_view，且只返回有摘要的记录）
+Flask 后端：新闻 API Blueprint（基于事实表 fact_events）
 依赖:
     pip install flask supabase
 环境变量（如未用环境变量，可直接按下方常量写死）:
@@ -15,16 +15,20 @@ from typing import Optional
 
 from flask import Blueprint, request, jsonify, make_response
 from postgrest.exceptions import APIError
-from supabase import create_client
+
+from infra.db import supabase
 
 # ====== 配置 ======
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s")
-VIEW_NAME = os.getenv("NEWS_FEED_VIEW", "news_feed_ready_view_v2")  # 你创建的视图名
+# 优先使用 NEWS_FEED_TABLE，兼容旧的 NEWS_FEED_VIEW
+NEWS_FEED_TABLE = (
+    os.getenv("NEWS_FEED_TABLE")
+    or os.getenv("NEWS_FEED_VIEW")
+    or "fact_events"
+)
 
 # ====== 初始化 ======
 news_bp = Blueprint('news', __name__)
-sb = create_client(SUPABASE_URL, SUPABASE_KEY)
+sb = supabase
 
 # ====== 工具函数 ======
 def iso_utc(dt: Optional[datetime]) -> Optional[str]:
@@ -35,13 +39,13 @@ def iso_utc(dt: Optional[datetime]) -> Optional[str]:
 
 def parse_time_maybe(s: Optional[str]) -> (Optional[str], Optional[str]):
     """
-    将数据库中的 publish_time（可能是 'YYYY-MM-DD' 或 ISO 字符串）拆成日期和时分。
+    将数据库中的 published_at（可能是 'YYYY-MM-DD' 或 ISO 字符串）拆成日期和时分。
     兼容：无 Z、微秒位数不标准等。
     """
     if not s:
         return None, None
     try:
-        t = s.strip()
+        t = str(s).strip()
         # 替换 Z
         if t.endswith("Z"):
             t = t.replace("Z", "+00:00")
@@ -80,27 +84,97 @@ def estimate_read_time(text: str) -> str:
     minutes = max(1, len(text) // 200)
     return f"{minutes}分钟"
 
-def map_category(news_type: Optional[str]) -> str:
-    """
-    将后端枚举（如 policy/industry/competitor/tech）映射到前端 category。
-    也可直接返回 news_type（英文），根据需要自行调整。
-    """
-    mapping = {
-        "policy": "policy",
-        "industry": "industry",
-        "competitor": "competitor",
-        "tech": "tech",
-    }
-    if not news_type:
-        return "all"
-    return mapping.get(news_type, news_type)
+NEWS_TYPE_ALIASES = {
+    "policy": "政策新闻",
+    "industry": "行业新闻",
+    "competitor": "竞品新闻",
+    "opportunity": "商机",
+    "新闻消息": "政策新闻",
+    "行业动态": "行业新闻",
+    "竞品消息": "竞品新闻",
+    "竞品动态": "竞品新闻",
+    "技术前沿": "行业新闻",
+    "政策": "政策新闻",
+    "行业": "行业新闻",
+    "竞品": "竞品新闻",
+    "机会": "商机",
+}
+
+TYPE_TO_NEWS_TYPE = {
+    "policy": "政策新闻",
+    "industry": "行业新闻",
+    "competitor": "竞品新闻",
+    "opportunity": "商机",
+}
+
+CATEGORY_FILTERS = {
+    "政策新闻": {
+        "news_type": ["政策新闻", "政策", "policy", "新闻消息", "政策动态"],
+        "type": ["policy"],
+    },
+    "行业新闻": {
+        "news_type": ["行业新闻", "行业", "industry", "行业动态", "技术前沿"],
+        "type": ["industry"],
+    },
+    "竞品新闻": {
+        "news_type": ["竞品新闻", "竞品动态", "竞品消息", "competitor"],
+        "type": ["competitor"],
+    },
+    "商机": {
+        "news_type": ["商机", "机会", "opportunity", "招标机会"],
+        "type": ["opportunity", "tender", "tenders"],
+    },
+}
+
+def normalize_news_type(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    return NEWS_TYPE_ALIASES.get(value, value)
+
+def normalize_category_param(value: Optional[str]) -> Optional[str]:
+    if not value or value == "all":
+        return None
+    return normalize_news_type(value)
+
+def map_category(news_type: Optional[str], fallback_type: Optional[str] = None) -> str:
+    if news_type:
+        return normalize_news_type(news_type) or news_type
+    mapped = TYPE_TO_NEWS_TYPE.get(fallback_type or "")
+    return mapped or "all"
+
+def normalize_payload(payload: Optional[object]) -> dict:
+    if not payload:
+        return {}
+    if isinstance(payload, dict):
+        return payload
+    try:
+        return json.loads(payload)
+    except Exception:
+        return {}
+
+def _build_or_clause(field: str, values: list) -> list:
+    return [f"{field}.eq.{value}" for value in values if value]
+
+def apply_category_filter(query, category_value: str):
+    filters = CATEGORY_FILTERS.get(category_value)
+    if not filters:
+        return query.eq("news_type", category_value)
+    clauses = []
+    clauses.extend(_build_or_clause("news_type", filters.get("news_type", [])))
+    clauses.extend(_build_or_clause("type", filters.get("type", [])))
+    if not clauses:
+        return query.eq("news_type", category_value)
+    return query.or_(",".join(clauses))
 
 # ====== 列表接口 ======
 @news_bp.route("/news", methods=["GET"])
 def get_news_list():
+    if not sb:
+        return jsonify({"code": 500, "message": "Supabase 未配置", "data": None}), 500
     page = int(request.args.get("page", 1))
     page_size = int(request.args.get("pageSize", 20))
-    category = request.args.get("category", "all")  # all/policy/industry/competitor/tech
+    category = request.args.get("category", "all")  # all/政策新闻/行业新闻/竞品新闻/商机
+    category = "".join(category.split())
     keyword = request.args.get("keyword", "").strip()
     date = request.args.get("date")
 
@@ -117,46 +191,46 @@ def get_news_list():
     end = start + page_size - 1
 
     # 基础查询 + 计数（exact）
-    query = sb.table(VIEW_NAME).select("*", count="exact")
+    query = sb.table(NEWS_FEED_TABLE).select("*", count="exact")
 
     # ✅ 只返回「有摘要」的记录（服务端过滤，total 与数据一致）
-    # 兼容不同 supabase-py 版本，统一用 filter("not.is","null")
-    query = query.filter("short_summary", "not.is", "null").neq("short_summary", "")
-    # query = query.filter("long_summary", "not.is", "null").neq("long_summary", "")
+    # 统一用 summary 字段兜底
+    query = query.filter("summary", "not.is", "null").neq("summary", "")
 
-    # 分类筛选（按英文枚举）
-    if category != "all":
-        query = query.eq("news_type", category)
+    # 分类筛选（按 news_type）
+    normalized_category = normalize_category_param(category)
+    if normalized_category:
+        query = apply_category_filter(query, normalized_category)
 
     # 关键词（对标题模糊）
     if keyword:
         query = query.ilike("title", f"%{keyword}%")
 
-    # 日期筛选（按 publish_time 的日期部分）
+    # 日期筛选（按 published_at 的日期部分）
     if date:
-        # 视图里 publish_time 是 timestamptz/文本？这里统一用 ilike 兼容
-        query = query.ilike("publish_time::text", f"{date}%")
+        query = query.gte("published_at", f"{date}T00:00:00")
+        query = query.lte("published_at", f"{date}T23:59:59.999999")
 
     # 日期范围（闭区间）
     if start_date:
-        query = query.gte("publish_time", f"{start_date}T00:00:00")
+        query = query.gte("published_at", f"{start_date}T00:00:00")
     if end_date:
-        query = query.lte("publish_time", f"{end_date}T23:59:59.999999")
+        query = query.lte("published_at", f"{end_date}T23:59:59.999999")
 
     # 视角快捷逻辑
     if view == "management":
         # 高管视角：优先有 AI 建议
-        query = query.filter("ai_suggestion", "not.is", "null").neq("ai_suggestion", "")
+        query = query.filter("payload->>ai_suggestion", "not.is", "null").neq("payload->>ai_suggestion", "")
     elif view == "analysis":
         # 分析视角：有长摘要
-        query = query.filter("long_summary", "not.is", "null").neq("long_summary", "")
+        query = query.filter("payload->>long_summary", "not.is", "null").neq("payload->>long_summary", "")
 
     # 显式只看有AI
     if only_ai:
-        query = query.filter("ai_suggestion", "not.is", "null").neq("ai_suggestion", "")
+        query = query.filter("payload->>ai_suggestion", "not.is", "null").neq("payload->>ai_suggestion", "")
 
-    # 排序（先按 publish_time 降序，再按 id 降序，保证稳定）
-    query = query.order("publish_time", desc=True).order("id", desc=True)
+    # 排序（先按 published_at 降序，再按 id 降序，保证稳定）
+    query = query.order("published_at", desc=True).order("id", desc=True)
 
     # 分页
     res = query.range(start, end).execute()
@@ -166,21 +240,29 @@ def get_news_list():
 
     news_list = []
     for r in rows:
-        # 视图里对应字段：
-        # id, title, publish_time, source_url, source_type, news_type,
-        # clean_text, short_summary, long_summary, created_at, updated_at
-        date_str, time_str = parse_time_maybe(r.get("publish_time"))
+        payload = normalize_payload(r.get("payload"))
+        date_str, time_str = parse_time_maybe(r.get("published_at"))
 
-        # 统一处理 AI 建议 & 时间字段兜底
-        ai_full = r.get("ai_suggestion_full")
-        ai_short = r.get("ai_suggestion")
+        summary_short = (
+            payload.get("short_summary")
+            or payload.get("summary_preview")
+            or payload.get("summary")
+            or r.get("summary")
+        )
+        summary_long = (
+            payload.get("long_summary")
+            or payload.get("summary")
+            or r.get("summary")
+        )
+
+        ai_full = payload.get("ai_suggestion_full")
+        ai_short = payload.get("ai_suggestion")
         if suggest_pref == "full":
             ai_selected = ai_full or ai_short
         else:
             ai_selected = ai_short or ai_full
 
-        # createdAt 兼容不同视图列名
-        created_col = r.get("summary_created_at") or r.get("created_at")
+        created_col = r.get("created_at")
         created_at_iso = None
         if created_col:
             try:
@@ -190,14 +272,19 @@ def get_news_list():
 
         news_list.append({
             "id": r["id"],
-            "category": map_category(r.get("news_type")),
+            "category": map_category(r.get("news_type"), r.get("type")),
             "title": r.get("title"),
-            "source": r.get("source_type"),
+            "source": r.get("source") or r.get("url"),
             "time": time_str,
             "publishTime": date_str,
-            "readTime": estimate_read_time(r.get("clean_text") or ""),
-            "link": r.get("source_url"),
-            "summary": r.get("short_summary"),
+            "readTime": estimate_read_time(
+                payload.get("clean_text")
+                or summary_long
+                or summary_short
+                or ""
+            ),
+            "link": r.get("url"),
+            "summary": summary_short or summary_long,
 
             # === AI 建议：按照参数选择返回，同时把两种都透出，前端可自行选择 ===
             "actionSuggestion": ai_selected,
@@ -206,6 +293,7 @@ def get_news_list():
             "hasAI": bool((ai_full and ai_full.strip()) or (ai_short and ai_short.strip())),
 
             "relatedNews": [],
+            "tags": r.get("keywords") or payload.get("keywords") or [],
             "createdAt": created_at_iso,
         })
 
@@ -231,14 +319,14 @@ def get_news_list():
 # ====== 详情接口 ======
 @news_bp.route("/news/<string:news_id>", methods=["GET"])
 def get_news_detail(news_id: str):
+    if not sb:
+        return jsonify({"code": 500, "message": "Supabase 未配置", "data": None}), 500
     # 只查有摘要的记录
     try:
         res = (
-            sb.table(VIEW_NAME)
+            sb.table(NEWS_FEED_TABLE)
             .select("*")
             .eq("id", news_id)
-            .filter("long_summary", "not.is", "null")
-            .neq("long_summary", "")
             .maybe_single()
             .execute()
         )
@@ -261,14 +349,15 @@ def get_news_detail(news_id: str):
         return response
 
     r = res.data
+    payload = normalize_payload(r.get("payload"))
 
-    date_str, time_str = parse_time_maybe(r.get("publish_time"))
+    date_str, time_str = parse_time_maybe(r.get("published_at"))
 
     # 建议长度偏好（full/short）
     suggest_pref = (request.args.get("suggest", "full") or "full").lower()
 
-    ai_full = r.get("ai_suggestion_full")
-    ai_short = r.get("ai_suggestion")
+    ai_full = payload.get("ai_suggestion_full")
+    ai_short = payload.get("ai_suggestion")
     if suggest_pref == "full":
         ai_selected = ai_full or ai_short
     else:
@@ -285,15 +374,30 @@ def get_news_detail(news_id: str):
 
     detail = {
         "id": r["id"],
-        "category": map_category(r.get("news_type")),
+        "category": map_category(r.get("news_type"), r.get("type")),
         "title": r.get("title"),
-        "source": r.get("source_type"),
+        "source": r.get("source") or r.get("url"),
         "time": time_str,
         "publishTime": date_str,
-        "readTime": estimate_read_time(r.get("clean_text") or ""),
-        "link": r.get("source_url"),
-        "content": r.get("clean_text"),
-        "summary": r.get("long_summary"),
+        "readTime": estimate_read_time(
+            payload.get("clean_text")
+            or payload.get("long_summary")
+            or payload.get("summary")
+            or r.get("summary")
+            or ""
+        ),
+        "link": r.get("url"),
+        "content": (
+            payload.get("clean_text")
+            or payload.get("long_summary")
+            or payload.get("summary")
+            or r.get("summary")
+        ),
+        "summary": (
+            payload.get("long_summary")
+            or payload.get("summary")
+            or r.get("summary")
+        ),
 
         # === AI 建议：按照参数选择返回，同时把两种都透出，前端可自行选择 ===
         "actionSuggestion": ai_selected,
@@ -302,10 +406,9 @@ def get_news_detail(news_id: str):
 
         "relatedNews": [],
 
-        # 若视图存在 tags_json / entities_json，择一透出；否则为空列表
-        "tags": r.get("tags_json") or r.get("entities_json") or [],
+        "tags": r.get("keywords") or payload.get("keywords") or [],
         "createdAt": to_iso_safe(r.get("created_at")),
-        "updatedAt": to_iso_safe(r.get("updated_at")),
+        "updatedAt": None,
     }
 
     response_data = {"code": 200, "message": "success", "data": detail}

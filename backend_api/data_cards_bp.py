@@ -11,23 +11,18 @@ KPI 概览接口 Blueprint（自动取数据库中最新数据日期）
   /api/dashboard/data-cards/trend
 """
 
-from flask import Blueprint, request, make_response
-from supabase import create_client, Client
 from datetime import datetime, timedelta, date as date_cls
 from typing import Dict, Tuple, List, Optional
-import os
 import json
+
+from flask import Blueprint, request, make_response
+
+from infra.db import supabase
 
 # ===================== 初始化 =====================
 data_cards_bp = Blueprint('data_cards', __name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("❌ 环境变量 SUPABASE_URL / SUPABASE_SERVICE_KEY 未配置。")
-
-sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+sb = supabase
 
 # ===================== 工具函数 =====================
 def _period_window(anchor: date_cls, period: str) -> Tuple[datetime, datetime]:
@@ -185,6 +180,9 @@ def get_data_cards_latest():
     - 卡片3（相关论文）→ 00_papers 表
     - 卡片4（新闻消息）→ 00_news 表
     """
+    if not sb:
+        return _json_err(500, "Supabase 未配置", http_status=500)
+
     period = request.args.get("period", "day")  # 保持兼容，但实际固定为2天
 
     # 使用当前时间作为锚点，统计最近2天和上2天
@@ -290,6 +288,9 @@ def _daily_points(start: datetime, end: datetime, counter_fn) -> List[Dict]:
 @data_cards_bp.route("/data-cards/trend", methods=["GET"])
 def get_data_cards_trend():
     """趋势数据接口（自动取最近2天数据）"""
+    if not sb:
+        return _json_err(500, "Supabase 未配置", http_status=500)
+
     card_id = int(request.args.get("cardId", 1))
     period = request.args.get("period", "week")
 

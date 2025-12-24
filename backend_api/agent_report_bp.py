@@ -16,31 +16,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Blueprint, make_response
 
-try:
-    from supabase import Client, create_client  # type: ignore
-    from postgrest.exceptions import APIError  # type: ignore
-except ImportError:  # pragma: no cover - 仅在缺少依赖时触发
-    Client = None  # type: ignore
-    create_client = None  # type: ignore
-    APIError = Exception  # type: ignore
+from infra.db import supabase
 
 # ===== 配置 =====
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_SERVICE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s",
-)
 AGENT_REPORT_SOURCE = os.getenv("AGENT_REPORT_SOURCE", "agent_initial_report_view")
 AGENT_REPORT_LIMIT = int(os.getenv("AGENT_REPORT_LIMIT", "12"))
 
 agent_report_bp = Blueprint("agent_report", __name__)
-
-_supabase: Optional[Client] = None
-if create_client and SUPABASE_URL and SUPABASE_KEY:
-    try:
-        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception:
-        _supabase = None
+_supabase = supabase
 
 # ===== 回退数据（与文档示例一致） =====
 _FALLBACK_GENERATED_AT = "2023-11-15T10:30:00Z"
@@ -232,4 +215,3 @@ def get_agent_initial_report():
 
 
 # 此 Blueprint 仅供 app.py 注册使用，无需独立运行入口
-

@@ -21,8 +21,6 @@ Databoard · 地图模块 API Blueprint
 """
 from __future__ import annotations
 
-from flask import Blueprint, jsonify, request, make_response
-from supabase import create_client, Client
 from datetime import datetime, timedelta, date as date_cls, timezone
 from typing import Dict, Tuple, List, Optional, Any, Iterable
 import time
@@ -31,16 +29,14 @@ import json
 import math
 import re
 
+from flask import Blueprint, jsonify, request, make_response
+
+from infra.db import supabase
+
 # ===================== 初始化 =====================
 databoard_map_bp = Blueprint("databoard_map", __name__)
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("❌ 环境变量 SUPABASE_URL / SUPABASE_SERVICE_KEY 未配置。")
-
-sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+sb = supabase
 
 # ============ 可配置：数据源与字段映射（按需要修改） ============
 # 数据类型到表与时间字段的映射
@@ -783,6 +779,9 @@ def get_map_data():
       - cityCode: 当 level=district 时必需
       - timeRange: day|week|month|quarter|year（可选，默认 day）
     """
+    if not sb:
+        return _json_err(50000, "Supabase 未配置", 500)
+
     try:
         level = request.args.get("level", "province")
         if level not in VALID_LEVELS:
@@ -992,6 +991,9 @@ def get_region_detail():
       - type: all|leads|tenders|policies|news（默认 all）
       - timeRange: day|week|month|quarter|year（默认 day）
     """
+    if not sb:
+        return _json_err(50000, "Supabase 未配置", 500)
+
     region = request.args.get("region")
     if not region:
         return _json_err(40001, "参数错误：region 必填", 400)
@@ -1125,6 +1127,9 @@ def get_map_summary():
       - type: all|leads|tenders|policies|news（默认 all）
       - timeRange: day|week|month|quarter|year（默认 day）
     """
+    if not sb:
+        return _json_err(50000, "Supabase 未配置", 500)
+
     region = request.args.get("region")
     try:
         anchor = _parse_date_arg(request.args.get("date"))
@@ -1285,6 +1290,9 @@ def get_region_trend():
       - period: day|week|month|quarter|year（默认 month；用于时间桶粒度与跨度）
       - date: YYYY-MM-DD（可选，锚点，默认今天）
     """
+    if not sb:
+        return _json_err(50000, "Supabase 未配置", 500)
+
     region = request.args.get("region")
     if not region:
         return _json_err(40001, "参数错误：region 必填", 400)

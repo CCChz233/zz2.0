@@ -80,7 +80,7 @@ README.md                   # 项目说明文档
 | `PORT` | `8000` | Flask 服务监听端口 |
 | `DAILY_REPORT_DEFAULT_VIEW` | `management` | 每日简报的默认视角（management/market/sales/product） |
 | `DAILY_REPORT_MAX` | `8` | 每日简报内部抓取上限（仅用于分页窗口） |
-| `NEWS_FEED_VIEW` | `news_feed_ready_view_v2` | 新闻接口使用的 Supabase 视图名称 |
+| `NEWS_FEED_TABLE` | `fact_events` | 新闻接口使用的 Supabase 表名（兼容旧的 `NEWS_FEED_VIEW` 配置） |
 | `AGENT_REPORT_SOURCE` | `agent_initial_report_view` | 智能体报告数据源视图 |
 | `AGENT_REPORT_LIMIT` | `12` | 智能体报告返回条目数上限 |
 | `DATABOARD_NEWS_TABLE` | `00_news` | 数据模块新闻表名 |
@@ -100,7 +100,7 @@ SUPABASE_URL=https://YOUR-PROJECT.supabase.co
 SUPABASE_SERVICE_KEY=YOUR-SERVICE-ROLE-KEY
 PORT=8000
 DAILY_REPORT_DEFAULT_VIEW=management
-NEWS_FEED_VIEW=news_feed_ready_view_v2
+NEWS_FEED_TABLE=fact_events
 AGENT_REPORT_SOURCE=agent_initial_report_view
 AGENT_REPORT_LIMIT=12
 DATABOARD_NEWS_TABLE=00_news
@@ -189,8 +189,7 @@ curl "http://127.0.0.1:8000/api/agent/initial-report"
 
 ### 核心表
 - `dashboard_daily_reports`：每日亮点存储，包含 `report_date`, `view`, `priority`, `payload` 等字段
-- `news_feed_ready_view_v2`：面向 API 的新闻汇总视图，整合 `news` 与 `news_summaries`
-- `fact_events`：地图模块事实表，按 `type` 字段区分不同类型的事件数据
+- `fact_events`：事实表（新闻接口与地图模块统一使用），包含 `news_type`、摘要、来源等字段
 - `agent_initial_report_view`：智能体初始报告数据源视图
 
 ### 业务表

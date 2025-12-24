@@ -252,7 +252,7 @@
 {
   "page": 1,                      // 页码，默认为1
   "pageSize": 20,                 // 每页数量，默认为20
-  "category": "all",              // 分类：all/policy/industry/competitor/tech
+  "category": "all",              // 分类：all/政策新闻/行业新闻/竞品新闻/商机
   "keyword": "",                  // 搜索关键词
   "date": "2023-11-15"           // 查询日期，默认为今天
 }
@@ -270,7 +270,7 @@
     "news": [
       {
         "id": 1,
-        "category": "机会",
+        "category": "政策新闻",
         "title": "国家发布新一代人工智能创新发展指导意见，明确支持企业建设行业大模型",
         "source": "政策新闻",
         "time": "09:32",
@@ -308,7 +308,7 @@
   "message": "success",
   "data": {
     "id": 1,
-    "category": "机会",
+    "category": "政策新闻",
     "title": "国家发布新一代人工智能创新发展指导意见，明确支持企业建设行业大模型",
     "source": "政策新闻",
     "time": "09:32",

@@ -10,9 +10,13 @@
 """
 
 import os
+import sys
 import json
 from flask import Flask
 from flask_cors import CORS
+
+# 确保可以导入项目根目录下的 infra 包
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 导入各个Blueprint
 from backend_api.daily_report_bp import daily_report_bp

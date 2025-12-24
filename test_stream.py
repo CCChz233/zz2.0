@@ -1,47 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-测试Qwen API流式传输
-用于验证流式传输是否正常工作
+测试统一 LLM 流式传输（基于 infra.llm.chat）
 """
 
-import os
 import json
-import requests
+import os
+import sys
 
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "sk-7cd135dca0834256a58e960048238db3")
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-turbo")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from infra.llm import chat
+
 
 def test_qwen_stream():
-    """测试Qwen API流式传输"""
-    url = f"{QWEN_BASE_URL}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {QWEN_API_KEY}",
-    }
-    
-    data = {
-        "model": QWEN_MODEL,
-        "messages": [
-            {"role": "user", "content": "请用一句话介绍你自己，然后数数从1到10"}
-        ],
-        "stream": True,
-        "temperature": 0.8,
-        "top_p": 0.8
-    }
-    
-    print("🚀 开始测试Qwen API流式传输...")
-    print(f"URL: {url}")
-    print(f"Model: {QWEN_MODEL}")
+    """测试统一大模型流式传输"""
+    messages = [
+        {"role": "user", "content": "请用一句话介绍你自己，然后数数从1到10"}
+    ]
+
+    print("🚀 开始测试统一 LLM 流式传输...")
     print("-" * 50)
-    
+
     try:
-        response = requests.post(url, headers=headers, json=data, stream=True, timeout=60)
-        response.raise_for_status()
-        
+        response = chat(messages, stream=True)
         print("✅ 连接成功，开始接收流式数据...\n")
-        
+
         chunk_count = 0
         full_content = ""
         
@@ -126,4 +110,3 @@ def test_qwen_stream():
 
 if __name__ == "__main__":
     test_qwen_stream()
-

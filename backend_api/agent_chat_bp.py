@@ -9,9 +9,10 @@
   DELETE /api/agent/chat/history/<session_id> - 删除聊天会话
 
 功能：
-  - 前后端分离：Qwen API调用在后端完成
+  - 前后端分离：LLM API调用在后端完成，支持多种模型后端
   - 聊天记录持久化：存储到Supabase
   - 流式传输：支持SSE流式响应
+  - 智能路由：自动或手动选择合适的服务（GPT-Researcher/DeepAnalyze/Default LLM）
 """
 
 import os
@@ -22,7 +23,9 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from flask import Blueprint, request, make_response, stream_with_context, jsonify
-from supabase import Client, create_client
+
+from infra.db import supabase
+from infra.llm import call_volcano_chat as llm_chat
 
 # 导入配置模块
 from config import build_system_prompt, get_default_options
@@ -35,12 +38,10 @@ from backend_api.gpt_researcher_adapter import (
 
 # 导入 DeepAnalyze 适配器
 from backend_api.deepanalyze_adapter import get_deepanalyze_adapter
+from backend_api.rag.rag_search import run_semantic_retrieval
+from backend_api.rag.rag_context import build_messages_with_evidence, build_evidence_block
 
 # ===== 配置 =====
-QWEN_API_KEY = os.getenv("QWEN_API_KEY", "sk-7cd135dca0834256a58e960048238db3")
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-turbo")
-
 # GPT-Researcher 配置
 USE_GPT_RESEARCHER = os.getenv("USE_GPT_RESEARCHER", "true").lower() == "true"
 AUTO_ROUTE_TASKS = os.getenv("AUTO_ROUTE_TASKS", "true").lower() == "true"  # 是否自动路由任务
@@ -48,26 +49,28 @@ AUTO_ROUTE_TASKS = os.getenv("AUTO_ROUTE_TASKS", "true").lower() == "true"  # �
 # DeepAnalyze 配置
 USE_DEEPANALYZE = os.getenv("USE_DEEPANALYZE", "true").lower() == "true"
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://zlajhzeylrzfbchycqyy.supabase.co")
-SUPABASE_KEY = os.getenv(
-    "SUPABASE_SERVICE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsYWpoemV5bHJ6ZmJjaHljcXl5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NTYwMTIwMiwiZXhwIjoyMDcxMTc3MjAyfQ.u6vYYEL3qCh4lJU62wEmT4UJTZrstX-_yscRPXrZH7s",
-)
-
 # 聊天记录表名（需要在Supabase中创建）
 CHAT_SESSIONS_TABLE = os.getenv("CHAT_SESSIONS_TABLE", "chat_sessions")
 CHAT_MESSAGES_TABLE = os.getenv("CHAT_MESSAGES_TABLE", "chat_messages")
 
-agent_chat_bp = Blueprint("agent_chat", __name__)
+RAG_KEYWORDS = ["新闻", "事件", "发布", "公告", "动态", "发生", "最近", "最新", "有哪些", "变化", "更新"]
 
-# 初始化Supabase客户端
-_supabase: Optional[Client] = None
-if SUPABASE_URL and SUPABASE_KEY:
+agent_chat_bp = Blueprint("agent_chat", __name__)
+_supabase = supabase
+
+
+def _get_env_int(name: str, default: int) -> int:
     try:
-        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        print(f"⚠️ Supabase初始化失败: {e}")
-        _supabase = None
+        return int(os.getenv(name, default))
+    except Exception:
+        return default
+
+
+def _get_env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except Exception:
+        return default
 
 
 def _to_iso(dt: Optional[datetime]) -> str:
@@ -79,28 +82,15 @@ def _to_iso(dt: Optional[datetime]) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _call_qwen_api(messages: List[Dict[str, str]], stream: bool = False, **options):
-    """调用Qwen API"""
-    url = f"{QWEN_BASE_URL}/chat/completions"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {QWEN_API_KEY}",
-    }
+def _call_default_llm(messages: List[Dict[str, str]], stream: bool = False, **options):
+    """
+    调用默认的大语言模型服务
     
-    data = {
-        "model": QWEN_MODEL,
-        "messages": messages,
-        "temperature": options.get("temperature", 0.8),
-        "top_p": options.get("top_p", 0.8),
-        **({"stream": True} if stream else {}),
-    }
-    
-    if options.get("max_tokens"):
-        data["max_tokens"] = options["max_tokens"]
-    
-    response = requests.post(url, headers=headers, json=data, stream=stream, timeout=60)
-    response.raise_for_status()
-    return response
+    该函数提供统一的 LLM 调用接口，实际使用的模型由 DEFAULT_LLM_PROVIDER 
+    环境变量控制（如 volcano, qwen, gpt-4, claude 等）。
+    这样设计能够在不修改代码的情况下灵活切换底层 LLM 服务。
+    """
+    return llm_chat(messages, stream=stream, **options)
 
 
 def _call_llm_api(
@@ -189,8 +179,8 @@ def _call_llm_api(
                         pass
                 return MockResponse(result)
     
-    # 默认使用 Qwen
-    return _call_qwen_api(messages, stream=stream, **options)
+    # 默认使用本地 LLM 服务
+    return _call_default_llm(messages, stream=stream, **options)
 
 
 def _save_message(session_id: str, role: str, content: str, message_id: Optional[str] = None):
@@ -288,12 +278,54 @@ def chat():
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
         
-        # 构建消息列表
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.extend(conversation_history)
-        messages.append({"role": "user", "content": user_message})
+        # 构建消息列表（先判断是否触发 RAG 检索）
+        use_rag = data.get("use_rag", False)
+        rag_triggered = bool(use_rag) or any(keyword in user_message for keyword in RAG_KEYWORDS)
+        messages: List[Dict[str, str]] = []
+        used_evidence: List[Dict[str, Any]] = []  # 收集本轮证据
+        if rag_triggered:
+            try:
+                rag_results = run_semantic_retrieval(
+                    user_message,
+                    k=_get_env_int("RAG_TOPK", 8),
+                    min_sim=_get_env_float("RAG_MIN_SIM", 0.4),
+                )
+                if rag_results:
+                    # NEW: 结构化证据
+                    used_evidence = [
+                        {
+                            "id": item.get("id"),
+                            "title": item.get("title"),
+                            "summary": item.get("summary"),
+                            "url": item.get("url"),
+                            "published_at": item.get("published_at"),
+                            "similarity": item.get("similarity"),
+                        }
+                        for item in rag_results
+                    ]
+                    evidence_text = build_evidence_block(rag_results)
+                    system_content = system_prompt or "你是一个有帮助的助手。"
+                    system_content = (
+                        f"{system_content}\n\n请严格基于以下检索到的证据回答，必要时引用标题/时间并附链接；"
+                        f"不得编造时间、事件、公司行为；若证据不足，请回复“数据库暂无相关信息”。\n{evidence_text}"
+                    )
+                    messages = [{"role": "system", "content": system_content}]
+                    messages.extend(conversation_history)
+                    messages.append({"role": "user", "content": user_message})
+                    print(f"🔍 RAG 检索已触发（use_rag={use_rag}），返回 {len(rag_results)} 条证据并已注入 system prompt")
+                else:
+                    rag_triggered = False
+                    print(f"🔍 RAG 检索已触发但无证据，回退到默认提示")
+            except Exception as exc:
+                rag_triggered = False
+                print(f"⚠️ RAG 处理异常，回退到默认聊天: {exc}")
+        
+        if not messages:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.extend(conversation_history)
+            messages.append({"role": "user", "content": user_message})
         
         # 先创建或更新会话（确保会话存在）
         _create_or_update_session(session_id)
@@ -348,6 +380,7 @@ def chat():
             "data": {
                 "session_id": session_id,
                 "content": ai_content,
+                "evidence": used_evidence,  # NEW: 返回证据
                 "conversation_history": conversation_history + [
                     {"role": "user", "content": user_message},
                     {"role": "assistant", "content": ai_content}
@@ -391,12 +424,54 @@ def chat_stream():
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
         
-        # 构建消息列表
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.extend(conversation_history)
-        messages.append({"role": "user", "content": user_message})
+        # 构建消息列表（先判断是否触发 RAG 检索）
+        use_rag = data.get("use_rag", False)
+        rag_triggered = bool(use_rag) or any(keyword in user_message for keyword in RAG_KEYWORDS)
+        messages: List[Dict[str, str]] = []
+        used_evidence: List[Dict[str, Any]] = []  # 收集本轮证据
+        if rag_triggered:
+            try:
+                rag_results = run_semantic_retrieval(
+                    user_message,
+                    k=_get_env_int("RAG_TOPK", 8),
+                    min_sim=_get_env_float("RAG_MIN_SIM", 0.4),
+                )
+                if rag_results:
+                    # NEW: 结构化证据
+                    used_evidence = [
+                        {
+                            "id": item.get("id"),
+                            "title": item.get("title"),
+                            "summary": item.get("summary"),
+                            "url": item.get("url"),
+                            "published_at": item.get("published_at"),
+                            "similarity": item.get("similarity"),
+                        }
+                        for item in rag_results
+                    ]
+                    evidence_text = build_evidence_block(rag_results)
+                    system_content = system_prompt or "你是一个有帮助的助手。"
+                    system_content = (
+                        f"{system_content}\n\n请严格基于以下检索到的证据回答，必要时引用标题/时间并附链接；"
+                        f"不得编造时间、事件、公司行为；若证据不足，请回复“数据库暂无相关信息”。\n{evidence_text}"
+                    )
+                    messages = [{"role": "system", "content": system_content}]
+                    messages.extend(conversation_history)
+                    messages.append({"role": "user", "content": user_message})
+                    print(f"🔍 [Stream] RAG 检索已触发（use_rag={use_rag}），返回 {len(rag_results)} 条证据并已注入 system prompt")
+                else:
+                    rag_triggered = False
+                    print(f"🔍 [Stream] RAG 检索已触发但无证据，回退到默认提示")
+            except Exception as exc:
+                rag_triggered = False
+                print(f"⚠️ [Stream] RAG 处理异常，回退到默认聊天: {exc}")
+        
+        if not messages:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.extend(conversation_history)
+            messages.append({"role": "user", "content": user_message})
         
         # 先创建或更新会话（确保会话存在）
         _create_or_update_session(session_id)
@@ -451,6 +526,11 @@ def chat_stream():
                 
                 # 发送初始事件
                 yield f"data: {json.dumps({'type': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+                # NEW: 推送证据事件（空列表也发送，方便前端处理）
+                if used_evidence:
+                    yield f"data: {json.dumps({'type': 'evidence', 'items': used_evidence}, ensure_ascii=False)}\n\n"
+                elif used_evidence == []:
+                    yield f"data: {json.dumps({'type': 'evidence', 'items': []}, ensure_ascii=False)}\n\n"
                 
                 if use_gpt_researcher:
                     # 使用 GPT-Researcher（支持进度显示）
@@ -689,4 +769,3 @@ def delete_chat_session(session_id):
         })
     except Exception as e:
         return jsonify({"code": 500, "message": f"服务器错误: {str(e)}", "data": None}), 500
-
