@@ -12,7 +12,7 @@
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -31,9 +31,14 @@ AGENT_REPORT_SEARCH_DEPTH = os.getenv("AGENT_REPORT_SEARCH_DEPTH", "basic").stri
 AGENT_REPORT_SEARCH_MAX_RESULTS = int(os.getenv("AGENT_REPORT_SEARCH_MAX_RESULTS", "6"))
 AGENT_REPORT_SOURCE_LIMIT = int(os.getenv("AGENT_REPORT_SOURCE_LIMIT", "6"))
 AGENT_REPORT_SUMMARY_MODEL = os.getenv("AGENT_REPORT_SUMMARY_MODEL") or None
+AGENT_REPORT_REFRESH_MINUTES = int(os.getenv("AGENT_REPORT_REFRESH_MINUTES", "1440"))
+AGENT_REPORT_GENERATION_ENABLED = (
+    os.getenv("AGENT_REPORT_GENERATION_ENABLED", "true").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 REPORT_CACHE_LOCK = threading.Lock()
-REPORT_CACHE_STATE: Dict[str, Any] = {"date": None, "payload": None}
+REPORT_CACHE_STATE: Dict[str, Any] = {"generatedAt": None, "payload": None}
 
 SECTION_CONFIGS = [
     {
@@ -155,6 +160,39 @@ def _to_iso(value: Optional[Any]) -> Optional[str]:
     return None
 
 
+def _parse_datetime(value: Optional[Any]) -> Optional[datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            if text.endswith("Z"):
+                text = text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return dt
+        except Exception:
+            return None
+    return None
+
+
+def _is_fresh(generated_at: Optional[str], now: Optional[datetime] = None) -> bool:
+    if AGENT_REPORT_REFRESH_MINUTES <= 0:
+        return False
+    dt = _parse_datetime(generated_at)
+    if not dt:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return now - dt <= timedelta(minutes=AGENT_REPORT_REFRESH_MINUTES)
+
+
 def _get_tavily_key() -> str:
     return os.getenv("TAVILY_API_KEY", "").strip()
 
@@ -188,15 +226,14 @@ def _fetch_cached_report(date_key: str) -> Optional[Tuple[str, List[Dict[str, An
         print(f"⚠️ 读取日报缓存失败: {exc}")
         return None
 
-
 def _fetch_latest_cached_report() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
     if not _supabase:
         return None
     try:
         res = (
             _supabase.table(AGENT_REPORT_CACHE_TABLE)
-            .select("cache_date, generated_at, sections, source, updated_at")
-            .order("cache_date", desc=True)
+            .select("cache_date, generated_at, sections, source, updated_at, created_at")
+            .order("generated_at", desc=True)
             .order("updated_at", desc=True)
             .limit(1)
             .execute()
@@ -208,14 +245,24 @@ def _fetch_latest_cached_report() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
         sections = row.get("sections")
         if not isinstance(sections, list):
             return None
-        generated_at = row.get("generated_at") or row.get("updated_at") or _FALLBACK_GENERATED_AT
+        generated_at = (
+            row.get("generated_at")
+            or row.get("updated_at")
+            or row.get("created_at")
+            or _FALLBACK_GENERATED_AT
+        )
         return generated_at, sections
     except Exception as exc:
         print(f"⚠️ 读取最新日报缓存失败: {exc}")
         return None
 
 
-def _save_cached_report(date_key: str, generated_at: str, sections: List[Dict[str, Any]], source: str) -> None:
+def _save_cached_report(
+    date_key: str,
+    generated_at: str,
+    sections: List[Dict[str, Any]],
+    source: str,
+) -> None:
     if not _supabase:
         return
     payload = {
@@ -226,9 +273,13 @@ def _save_cached_report(date_key: str, generated_at: str, sections: List[Dict[st
         "updated_at": _to_iso(datetime.now(timezone.utc)) or _FALLBACK_GENERATED_AT,
     }
     try:
-        _supabase.table(AGENT_REPORT_CACHE_TABLE).upsert(payload, on_conflict="cache_date").execute()
+        _supabase.table(AGENT_REPORT_CACHE_TABLE).insert(payload).execute()
     except Exception as exc:
-        print(f"⚠️ 写入日报缓存失败: {exc}")
+        msg = str(exc)
+        if "duplicate key value" in msg or "unique constraint" in msg:
+            print("⚠️ 写入日报缓存失败：缓存表仍是单日唯一键，请先升级表结构以支持同日多条记录")
+        else:
+            print(f"⚠️ 写入日报缓存失败: {exc}")
 
 
 def _normalize_date(value: Optional[Any]) -> Optional[str]:
@@ -435,45 +486,38 @@ def _build_dynamic_sections() -> Tuple[str, List[Dict[str, Any]]]:
     return generated_at, sections
 
 
-def _get_cached_or_refresh(force_refresh: bool) -> Tuple[str, List[Dict[str, Any]], str]:
-    today = _today_key()
+def _get_cached_or_refresh(force_refresh: bool, can_generate: bool) -> Tuple[str, List[Dict[str, Any]], str]:
+    now = datetime.now(timezone.utc)
+
     if not force_refresh:
         with REPORT_CACHE_LOCK:
-            cached_date = REPORT_CACHE_STATE.get("date")
             cached_payload = REPORT_CACHE_STATE.get("payload")
-            if cached_payload and cached_date == today:
-                return cached_payload["generatedAt"], cached_payload["sections"], "cache"
+            cached_generated = REPORT_CACHE_STATE.get("generatedAt")
+        if cached_payload and _is_fresh(cached_generated, now):
+            return cached_payload["generatedAt"], cached_payload["sections"], "cache"
 
-        cached_db = _fetch_cached_report(today)
-        if cached_db:
-            generated_at, sections = cached_db
-            payload = {"generatedAt": generated_at, "sections": sections}
-            with REPORT_CACHE_LOCK:
-                REPORT_CACHE_STATE["date"] = today
-                REPORT_CACHE_STATE["payload"] = payload
-            return generated_at, sections, "cache-db"
-
-    try:
-        generated_at, sections = _build_dynamic_sections()
-    except Exception as exc:
-        print(f"⚠️ 生成动态日报失败，回退缓存: {exc}")
+    cached_latest = _fetch_latest_cached_report()
+    if cached_latest:
+        generated_at, sections = cached_latest
+        payload = {"generatedAt": generated_at, "sections": sections}
         with REPORT_CACHE_LOCK:
-            cached_payload = REPORT_CACHE_STATE.get("payload")
-        if cached_payload:
-            return cached_payload["generatedAt"], cached_payload["sections"], "cache-stale"
-        cached_db = _fetch_cached_report(today)
-        if cached_db:
-            return cached_db[0], cached_db[1], "cache-stale"
-        cached_latest = _fetch_latest_cached_report()
-        if cached_latest:
-            return cached_latest[0], cached_latest[1], "cache-stale"
-        raise
+            REPORT_CACHE_STATE["generatedAt"] = generated_at
+            REPORT_CACHE_STATE["payload"] = payload
+        if not force_refresh and _is_fresh(generated_at, now):
+            return generated_at, sections, "cache-db"
+        if not can_generate:
+            return generated_at, sections, "cache-stale"
+    elif not can_generate:
+        raise RuntimeError("report generation disabled and no cache available")
 
+    generated_at, sections = _build_dynamic_sections()
     payload = {"generatedAt": generated_at, "sections": sections}
     with REPORT_CACHE_LOCK:
-        REPORT_CACHE_STATE["date"] = today
+        REPORT_CACHE_STATE["generatedAt"] = generated_at
         REPORT_CACHE_STATE["payload"] = payload
-    _save_cached_report(today, generated_at, sections, "tavily")
+
+    cache_date = _normalize_date(generated_at) or _today_key()
+    _save_cached_report(cache_date, generated_at, sections, "tavily")
     return generated_at, sections, "tavily"
 
 
@@ -565,17 +609,11 @@ def get_agent_initial_report():
     tavily_key = _get_tavily_key()
     if not tavily_key:
         print("[WARN] TAVILY_API_KEY missing; Tavily fetch disabled")
-    if tavily_key:
-        try:
-            generated_at, sections, source = _get_cached_or_refresh(force_refresh)
-        except Exception:
-            try:
-                generated_at, sections = _fetch_from_supabase(AGENT_REPORT_LIMIT)
-                source = "remote"
-            except Exception:
-                generated_at, sections = _fallback_report()
-                source = "fallback"
-    else:
+
+    can_generate = bool(tavily_key) and (AGENT_REPORT_GENERATION_ENABLED or force_refresh)
+    try:
+        generated_at, sections, source = _get_cached_or_refresh(force_refresh, can_generate)
+    except Exception:
         try:
             generated_at, sections = _fetch_from_supabase(AGENT_REPORT_LIMIT)
             source = "remote"

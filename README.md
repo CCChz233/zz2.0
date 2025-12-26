@@ -84,6 +84,8 @@ README.md                   # 项目说明文档
 | `AGENT_REPORT_SOURCE` | `agent_initial_report_view` | 智能体报告数据源视图 |
 | `AGENT_REPORT_LIMIT` | `12` | 智能体报告返回条目数上限 |
 | `AGENT_REPORT_CACHE_TABLE` | `agent_daily_report_cache` | 智能体初始报告缓存表 |
+| `AGENT_REPORT_GENERATION_ENABLED` | `true` | 是否允许生成新报告（false 时仅使用缓存，refresh=1 可强制生成） |
+| `AGENT_REPORT_REFRESH_MINUTES` | `1440` | 智能体报告刷新间隔（分钟） |
 | `DATABOARD_NEWS_TABLE` | `00_news` | 数据模块新闻表名 |
 | `DATABOARD_COMPETITOR_NEWS_TABLE` | `00_competitors_news` | 数据模块竞品新闻表名 |
 | `DATABOARD_COMPETITORS_TABLE` | `00_competitors` | 数据模块竞品公司表名 |
@@ -110,6 +112,8 @@ NEWS_FEED_TABLE=fact_events
 AGENT_REPORT_SOURCE=agent_initial_report_view
 AGENT_REPORT_LIMIT=12
 AGENT_REPORT_CACHE_TABLE=agent_daily_report_cache
+AGENT_REPORT_GENERATION_ENABLED=true
+AGENT_REPORT_REFRESH_MINUTES=1440
 DATABOARD_NEWS_TABLE=00_news
 DATABOARD_COMPETITOR_NEWS_TABLE=00_competitors_news
 DATABOARD_COMPETITORS_TABLE=00_competitors
@@ -162,6 +166,8 @@ WEB_SEARCH_CACHE_TABLE=agent_web_search_cache
 ```
 backend/backend_api/agent_cache_tables.sql
 ```
+
+说明：智能体日报缓存表已支持“同一天多条记录”，如需从旧表结构迁移，请按 `agent_cache_tables.sql` 里的迁移提示执行。
 
 ### API Examples
 ```bash
