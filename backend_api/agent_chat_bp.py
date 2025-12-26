@@ -40,6 +40,10 @@ from backend_api.gpt_researcher_adapter import (
 from backend_api.deepanalyze_adapter import get_deepanalyze_adapter
 from backend_api.rag.rag_search import run_semantic_retrieval
 from backend_api.rag.rag_context import build_messages_with_evidence, build_evidence_block
+from backend_api.web_search import (
+    search_web,
+    build_web_evidence_block,
+)
 
 # ===== 配置 =====
 # GPT-Researcher 配置
@@ -54,6 +58,18 @@ CHAT_SESSIONS_TABLE = os.getenv("CHAT_SESSIONS_TABLE", "chat_sessions")
 CHAT_MESSAGES_TABLE = os.getenv("CHAT_MESSAGES_TABLE", "chat_messages")
 
 RAG_KEYWORDS = ["新闻", "事件", "发布", "公告", "动态", "发生", "最近", "最新", "有哪些", "变化", "更新"]
+WEB_SEARCH_KEYWORDS = [
+    "最新",
+    "最近",
+    "新闻",
+    "政策",
+    "发布",
+    "进展",
+    "研究",
+    "报道",
+    "公告",
+    "行业",
+]
 
 agent_chat_bp = Blueprint("agent_chat", __name__)
 _supabase = supabase
@@ -73,6 +89,12 @@ def _get_env_float(name: str, default: float) -> float:
         return default
 
 
+USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "true").lower() == "true"
+WEB_SEARCH_TOPK = _get_env_int("WEB_SEARCH_TOPK", 6)
+WEB_SEARCH_CACHE_MINUTES = _get_env_int("WEB_SEARCH_CACHE_MINUTES", 30)
+WEB_SEARCH_MIN_SCORE = _get_env_float("WEB_SEARCH_MIN_SCORE", 0.0)
+
+
 def _to_iso(dt: Optional[datetime]) -> str:
     """将datetime转换为ISO8601格式"""
     if dt is None:
@@ -80,6 +102,170 @@ def _to_iso(dt: Optional[datetime]) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _contains_keyword(text: str, keywords: List[str]) -> bool:
+    if not text:
+        return False
+    return any(keyword in text for keyword in keywords)
+
+
+def _build_sources_payload(evidence: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    grouped = {"database": [], "internet": []}
+    seen = {"database": set(), "internet": set()}
+
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        origin = (item.get("origin") or "").strip().lower()
+        if origin == "rag":
+            group_key = "database"
+        elif origin == "web":
+            group_key = "internet"
+        else:
+            continue
+
+        title = str(item.get("title") or "").strip()
+        url = str(item.get("url") or "").strip()
+        source_name = str(item.get("source") or "").strip()
+        published_at = (
+            item.get("published_at")
+            or item.get("publishedAt")
+            or item.get("published")
+            or item.get("date")
+            or ""
+        )
+
+        if not title and not url:
+            continue
+        key = url or title
+        if key in seen[group_key]:
+            continue
+        seen[group_key].add(key)
+
+        grouped[group_key].append(
+            {
+                "title": title or url or source_name or "未知来源",
+                "url": url,
+                "source": source_name,
+                "publishedAt": published_at,
+                "origin": origin,
+            }
+        )
+
+    return grouped
+
+
+def _build_retrieval_messages(
+    user_message: str,
+    system_prompt: str,
+    conversation_history: List[Dict[str, str]],
+    use_rag: bool,
+    use_web_search: bool,
+) -> Dict[str, object]:
+    rag_triggered = bool(use_rag) or _contains_keyword(user_message, RAG_KEYWORDS)
+    web_triggered = bool(use_web_search) or _contains_keyword(user_message, WEB_SEARCH_KEYWORDS)
+    combined_triggered = rag_triggered or web_triggered
+
+    rag_results: List[Dict[str, Any]] = []
+    web_results: List[Dict[str, object]] = []
+    used_evidence: List[Dict[str, Any]] = []
+
+    if combined_triggered:
+        try:
+            rag_results = run_semantic_retrieval(
+                user_message,
+                k=_get_env_int("RAG_TOPK", 8),
+                min_sim=_get_env_float("RAG_MIN_SIM", 0.4),
+            )
+        except Exception as exc:
+            print(f"⚠️ RAG 处理异常，回退到默认聊天: {exc}")
+
+        if USE_WEB_SEARCH:
+            try:
+                web_results = search_web(
+                    user_message,
+                    max_results=WEB_SEARCH_TOPK,
+                    min_score=WEB_SEARCH_MIN_SCORE,
+                    cache_ttl_seconds=WEB_SEARCH_CACHE_MINUTES * 60,
+                )
+            except Exception as exc:
+                print(f"⚠️ Web 搜索失败: {exc}")
+        elif web_triggered:
+            print("⚠️ Web 搜索已触发但未启用 USE_WEB_SEARCH")
+
+    if rag_results:
+        used_evidence.extend(
+            [
+                {
+                    "id": item.get("id"),
+                    "title": item.get("title"),
+                    "summary": item.get("summary"),
+                    "url": item.get("url"),
+                    "published_at": item.get("published_at"),
+                    "source": item.get("source") or item.get("source_name"),
+                    "similarity": item.get("similarity"),
+                    "origin": "rag",
+                }
+                for item in rag_results
+            ]
+        )
+    if web_results:
+        used_evidence.extend(
+            [
+                {
+                    "id": None,
+                    "title": item.get("title"),
+                    "summary": item.get("snippet"),
+                    "url": item.get("url"),
+                    "published_at": item.get("publishedAt"),
+                    "source": item.get("source"),
+                    "similarity": item.get("score"),
+                    "origin": "web",
+                }
+                for item in web_results
+            ]
+        )
+
+    evidence_blocks: List[str] = []
+    if rag_results:
+        evidence_blocks.append(f"【本地知识库】\n{build_evidence_block(rag_results)}")
+    if web_results:
+        evidence_blocks.append(build_web_evidence_block(web_results))
+
+    messages: List[Dict[str, str]] = []
+    if evidence_blocks:
+        system_content = system_prompt or "你是一个有帮助的助手。"
+        system_content = (
+            f"{system_content}\n\n"
+            "请优先使用【本地知识库】证据回答，必要时再引用【网络搜索】；"
+            "不要在正文中输出来源列表，来源由系统统一追加。"
+            "若证据不足，请直接说明信息不足，不要编造。\n"
+            + "\n\n".join(evidence_blocks)
+        )
+        messages = [{"role": "system", "content": system_content}]
+        messages.extend(conversation_history)
+        messages.append({"role": "user", "content": user_message})
+
+        if rag_results:
+            print(f"🔍 RAG 检索已触发，返回 {len(rag_results)} 条证据")
+        if web_results:
+            print(f"🌐 Web 搜索已触发，返回 {len(web_results)} 条证据")
+    else:
+        if combined_triggered:
+            print("🔍 检索已触发但无证据，回退到默认提示")
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.extend(conversation_history)
+        messages.append({"role": "user", "content": user_message})
+
+    return {
+        "messages": messages,
+        "used_evidence": used_evidence,
+        "sources": _build_sources_payload(used_evidence),
+    }
 
 
 def _call_default_llm(messages: List[Dict[str, str]], stream: bool = False, **options):
@@ -278,54 +464,19 @@ def chat():
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
         
-        # 构建消息列表（先判断是否触发 RAG 检索）
+        # 构建消息列表（本地 RAG + 联网搜索）
         use_rag = data.get("use_rag", False)
-        rag_triggered = bool(use_rag) or any(keyword in user_message for keyword in RAG_KEYWORDS)
-        messages: List[Dict[str, str]] = []
-        used_evidence: List[Dict[str, Any]] = []  # 收集本轮证据
-        if rag_triggered:
-            try:
-                rag_results = run_semantic_retrieval(
-                    user_message,
-                    k=_get_env_int("RAG_TOPK", 8),
-                    min_sim=_get_env_float("RAG_MIN_SIM", 0.4),
-                )
-                if rag_results:
-                    # NEW: 结构化证据
-                    used_evidence = [
-                        {
-                            "id": item.get("id"),
-                            "title": item.get("title"),
-                            "summary": item.get("summary"),
-                            "url": item.get("url"),
-                            "published_at": item.get("published_at"),
-                            "similarity": item.get("similarity"),
-                        }
-                        for item in rag_results
-                    ]
-                    evidence_text = build_evidence_block(rag_results)
-                    system_content = system_prompt or "你是一个有帮助的助手。"
-                    system_content = (
-                        f"{system_content}\n\n请严格基于以下检索到的证据回答，必要时引用标题/时间并附链接；"
-                        f"不得编造时间、事件、公司行为；若证据不足，请回复“数据库暂无相关信息”。\n{evidence_text}"
-                    )
-                    messages = [{"role": "system", "content": system_content}]
-                    messages.extend(conversation_history)
-                    messages.append({"role": "user", "content": user_message})
-                    print(f"🔍 RAG 检索已触发（use_rag={use_rag}），返回 {len(rag_results)} 条证据并已注入 system prompt")
-                else:
-                    rag_triggered = False
-                    print(f"🔍 RAG 检索已触发但无证据，回退到默认提示")
-            except Exception as exc:
-                rag_triggered = False
-                print(f"⚠️ RAG 处理异常，回退到默认聊天: {exc}")
-        
-        if not messages:
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.extend(conversation_history)
-            messages.append({"role": "user", "content": user_message})
+        use_web_search = data.get("use_web_search", False)
+        retrieval = _build_retrieval_messages(
+            user_message=user_message,
+            system_prompt=system_prompt,
+            conversation_history=conversation_history,
+            use_rag=use_rag,
+            use_web_search=use_web_search,
+        )
+        messages = retrieval["messages"]
+        used_evidence = retrieval["used_evidence"]
+        sources_payload = retrieval["sources"]
         
         # 先创建或更新会话（确保会话存在）
         _create_or_update_session(session_id)
@@ -367,7 +518,7 @@ def chat():
         
         if not ai_content:
             ai_content = "抱歉，我暂时无法理解您的问题，请换个方式提问。"
-        
+
         # 保存AI回复
         _save_message(session_id, "assistant", ai_content)
         
@@ -381,6 +532,7 @@ def chat():
                 "session_id": session_id,
                 "content": ai_content,
                 "evidence": used_evidence,  # NEW: 返回证据
+                "sources": sources_payload,
                 "conversation_history": conversation_history + [
                     {"role": "user", "content": user_message},
                     {"role": "assistant", "content": ai_content}
@@ -424,54 +576,18 @@ def chat_stream():
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
         
-        # 构建消息列表（先判断是否触发 RAG 检索）
+        # 构建消息列表（本地 RAG + 联网搜索）
         use_rag = data.get("use_rag", False)
-        rag_triggered = bool(use_rag) or any(keyword in user_message for keyword in RAG_KEYWORDS)
-        messages: List[Dict[str, str]] = []
-        used_evidence: List[Dict[str, Any]] = []  # 收集本轮证据
-        if rag_triggered:
-            try:
-                rag_results = run_semantic_retrieval(
-                    user_message,
-                    k=_get_env_int("RAG_TOPK", 8),
-                    min_sim=_get_env_float("RAG_MIN_SIM", 0.4),
-                )
-                if rag_results:
-                    # NEW: 结构化证据
-                    used_evidence = [
-                        {
-                            "id": item.get("id"),
-                            "title": item.get("title"),
-                            "summary": item.get("summary"),
-                            "url": item.get("url"),
-                            "published_at": item.get("published_at"),
-                            "similarity": item.get("similarity"),
-                        }
-                        for item in rag_results
-                    ]
-                    evidence_text = build_evidence_block(rag_results)
-                    system_content = system_prompt or "你是一个有帮助的助手。"
-                    system_content = (
-                        f"{system_content}\n\n请严格基于以下检索到的证据回答，必要时引用标题/时间并附链接；"
-                        f"不得编造时间、事件、公司行为；若证据不足，请回复“数据库暂无相关信息”。\n{evidence_text}"
-                    )
-                    messages = [{"role": "system", "content": system_content}]
-                    messages.extend(conversation_history)
-                    messages.append({"role": "user", "content": user_message})
-                    print(f"🔍 [Stream] RAG 检索已触发（use_rag={use_rag}），返回 {len(rag_results)} 条证据并已注入 system prompt")
-                else:
-                    rag_triggered = False
-                    print(f"🔍 [Stream] RAG 检索已触发但无证据，回退到默认提示")
-            except Exception as exc:
-                rag_triggered = False
-                print(f"⚠️ [Stream] RAG 处理异常，回退到默认聊天: {exc}")
-        
-        if not messages:
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.extend(conversation_history)
-            messages.append({"role": "user", "content": user_message})
+        use_web_search = data.get("use_web_search", False)
+        retrieval = _build_retrieval_messages(
+            user_message=user_message,
+            system_prompt=system_prompt,
+            conversation_history=conversation_history,
+            use_rag=use_rag,
+            use_web_search=use_web_search,
+        )
+        messages = retrieval["messages"]
+        used_evidence = retrieval["used_evidence"]
         
         # 先创建或更新会话（确保会话存在）
         _create_or_update_session(session_id)

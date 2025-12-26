@@ -33,6 +33,8 @@
     {"role": "user", "content": "历史消息1"},
     {"role": "assistant", "content": "历史回复1"}
   ],
+  "use_rag": true,
+  "use_web_search": true,
   "options": {
     "temperature": 0.8,
     "top_p": 0.8,
@@ -50,6 +52,33 @@
   "data": {
     "session_id": "uuid-string",
     "content": "AI回复内容",
+    "evidence": [
+      {
+        "title": "证据标题",
+        "url": "https://example.com",
+        "published_at": "2025-01-01",
+        "origin": "web",
+        "source": "example.com"
+      }
+    ],
+    "sources": {
+      "database": [
+        {
+          "title": "本地知识库来源",
+          "url": "",
+          "publishedAt": "2025-01-01",
+          "origin": "rag"
+        }
+      ],
+      "internet": [
+        {
+          "title": "网络来源",
+          "url": "https://example.com",
+          "publishedAt": "2025-01-01",
+          "origin": "web"
+        }
+      ]
+    },
     "conversation_history": [
       {"role": "user", "content": "用户消息"},
       {"role": "assistant", "content": "AI回复"}
@@ -75,17 +104,22 @@
 {"type": "start", "session_id": "uuid-string"}
 ```
 
-2. `chunk` - 数据块
+2. `evidence` - 检索证据
+```json
+{"type": "evidence", "items": [{"title": "证据标题", "url": "https://example.com", "origin": "web"}]}
+```
+
+3. `chunk` - 数据块
 ```json
 {"type": "chunk", "content": "部分内容"}
 ```
 
-3. `done` - 流完成
+4. `done` - 流完成
 ```json
 {"type": "done", "session_id": "uuid-string"}
 ```
 
-4. `error` - 错误
+5. `error` - 错误
 ```json
 {"type": "error", "message": "错误信息"}
 ```
@@ -212,6 +246,13 @@ QWEN_MODEL=qwen-turbo
 SUPABASE_URL=your-supabase-url
 SUPABASE_SERVICE_KEY=your-service-key
 
+# Web搜索（Tavily）
+TAVILY_API_KEY=your-tavily-key
+USE_WEB_SEARCH=true
+WEB_SEARCH_TOPK=6
+WEB_SEARCH_CACHE_MINUTES=30
+WEB_SEARCH_MIN_SCORE=0
+
 # 数据库表名（可选，有默认值）
 CHAT_SESSIONS_TABLE=chat_sessions
 CHAT_MESSAGES_TABLE=chat_messages
@@ -233,4 +274,3 @@ CHAT_MESSAGES_TABLE=chat_messages
 2. 聊天记录会自动保存到数据库
 3. 会话ID如果不提供，会自动生成新的UUID
 4. 对话历史建议限制在20条以内，避免超出token限制
-

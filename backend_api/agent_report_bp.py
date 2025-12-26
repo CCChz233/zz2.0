@@ -11,16 +11,56 @@
 
 import json
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+import requests
 
 from flask import Blueprint, make_response
 
+from infra import llm
 from infra.db import supabase
 
 # ===== 配置 =====
 AGENT_REPORT_SOURCE = os.getenv("AGENT_REPORT_SOURCE", "agent_initial_report_view")
 AGENT_REPORT_LIMIT = int(os.getenv("AGENT_REPORT_LIMIT", "12"))
+AGENT_REPORT_CACHE_TABLE = os.getenv("AGENT_REPORT_CACHE_TABLE", "agent_daily_report_cache")
+AGENT_REPORT_SEARCH_DEPTH = os.getenv("AGENT_REPORT_SEARCH_DEPTH", "basic").strip() or "basic"
+AGENT_REPORT_SEARCH_MAX_RESULTS = int(os.getenv("AGENT_REPORT_SEARCH_MAX_RESULTS", "6"))
+AGENT_REPORT_SOURCE_LIMIT = int(os.getenv("AGENT_REPORT_SOURCE_LIMIT", "6"))
+AGENT_REPORT_SUMMARY_MODEL = os.getenv("AGENT_REPORT_SUMMARY_MODEL") or None
+
+REPORT_CACHE_LOCK = threading.Lock()
+REPORT_CACHE_STATE: Dict[str, Any] = {"date": None, "payload": None}
+
+SECTION_CONFIGS = [
+    {
+        "id": 1,
+        "title": "政策解读",
+        "heading": "最新政策动态",
+        "icon": "el-icon-document-checked",
+        "priority": 1,
+        "query": "高端科学仪器 国产化 政策 动态 近期 规划 建议",
+    },
+    {
+        "id": 2,
+        "title": "论文报告",
+        "heading": "前沿研究进展",
+        "icon": "el-icon-reading",
+        "priority": 2,
+        "query": "原子力显微镜 磁性探针 纳米表征 最新研究 论文 进展",
+    },
+    {
+        "id": 3,
+        "title": "市场动态",
+        "heading": "最新产业动态",
+        "icon": "el-icon-data-line",
+        "priority": 3,
+        "query": "精密仪器 行业 动态 产业 合作 投资 近期",
+    },
+]
 
 agent_report_bp = Blueprint("agent_report", __name__)
 _supabase = supabase
@@ -115,6 +155,328 @@ def _to_iso(value: Optional[Any]) -> Optional[str]:
     return None
 
 
+def _get_tavily_key() -> str:
+    return os.getenv("TAVILY_API_KEY", "").strip()
+
+
+def _today_key() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _fetch_cached_report(date_key: str) -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    if not _supabase:
+        return None
+    try:
+        res = (
+            _supabase.table(AGENT_REPORT_CACHE_TABLE)
+            .select("generated_at, sections, source, updated_at")
+            .eq("cache_date", date_key)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        sections = row.get("sections")
+        if not isinstance(sections, list):
+            return None
+        generated_at = row.get("generated_at") or row.get("updated_at") or _FALLBACK_GENERATED_AT
+        return generated_at, sections
+    except Exception as exc:
+        print(f"⚠️ 读取日报缓存失败: {exc}")
+        return None
+
+
+def _fetch_latest_cached_report() -> Optional[Tuple[str, List[Dict[str, Any]]]]:
+    if not _supabase:
+        return None
+    try:
+        res = (
+            _supabase.table(AGENT_REPORT_CACHE_TABLE)
+            .select("cache_date, generated_at, sections, source, updated_at")
+            .order("cache_date", desc=True)
+            .order("updated_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        if not rows:
+            return None
+        row = rows[0]
+        sections = row.get("sections")
+        if not isinstance(sections, list):
+            return None
+        generated_at = row.get("generated_at") or row.get("updated_at") or _FALLBACK_GENERATED_AT
+        return generated_at, sections
+    except Exception as exc:
+        print(f"⚠️ 读取最新日报缓存失败: {exc}")
+        return None
+
+
+def _save_cached_report(date_key: str, generated_at: str, sections: List[Dict[str, Any]], source: str) -> None:
+    if not _supabase:
+        return
+    payload = {
+        "cache_date": date_key,
+        "generated_at": generated_at,
+        "sections": sections,
+        "source": source,
+        "updated_at": _to_iso(datetime.now(timezone.utc)) or _FALLBACK_GENERATED_AT,
+    }
+    try:
+        _supabase.table(AGENT_REPORT_CACHE_TABLE).upsert(payload, on_conflict="cache_date").execute()
+    except Exception as exc:
+        print(f"⚠️ 写入日报缓存失败: {exc}")
+
+
+def _normalize_date(value: Optional[Any]) -> Optional[str]:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        if text.endswith("Z"):
+            text = text.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        return dt.date().isoformat()
+    except Exception:
+        return text[:10] if len(text) >= 10 else None
+
+
+def _extract_source_name(url: str) -> str:
+    if not url:
+        return ""
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc or ""
+    except Exception:
+        return ""
+
+
+def _truncate(text: str, limit: int) -> str:
+    if not text:
+        return ""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "..."
+
+
+def _normalize_tavily_result(raw: dict) -> dict:
+    title = str(raw.get("title") or "").strip()
+    url = str(raw.get("url") or "").strip()
+    snippet = (
+        str(raw.get("content") or raw.get("snippet") or raw.get("summary") or "").strip()
+    )
+    published_at = _normalize_date(
+        raw.get("published_date")
+        or raw.get("published_time")
+        or raw.get("published")
+        or raw.get("date")
+    )
+    source = str(raw.get("source") or "").strip() or _extract_source_name(url)
+    return {
+        "title": title,
+        "url": url,
+        "snippet": _truncate(snippet, 260),
+        "publishedAt": published_at,
+        "source": source,
+    }
+
+
+def _dedupe_results(results: List[dict]) -> List[dict]:
+    seen = set()
+    deduped = []
+    for item in results:
+        key = item.get("url") or item.get("title")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _call_tavily_search(query: str, max_results: int) -> List[dict]:
+    api_key = _get_tavily_key()
+    if not api_key:
+        raise RuntimeError("missing TAVILY_API_KEY")
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "search_depth": AGENT_REPORT_SEARCH_DEPTH,
+        "max_results": max_results,
+        "include_answer": False,
+        "include_images": False,
+        "include_raw_content": False,
+    }
+    timeout = int(os.getenv("TAVILY_TIMEOUT", "25"))
+    try:
+        response = requests.post("https://api.tavily.com/search", json=payload, timeout=timeout)
+        response.raise_for_status()
+        data = response.json() or {}
+    except requests.RequestException as exc:
+        detail = ""
+        if getattr(exc, "response", None) is not None:
+            try:
+                detail = exc.response.text[:300]
+            except Exception:
+                detail = ""
+        print(f"⚠️ Tavily 请求失败: {exc} {detail}".strip())
+        raise
+    raw_results = data.get("results") or []
+    normalized = [_normalize_tavily_result(item) for item in raw_results if isinstance(item, dict)]
+    normalized = [item for item in normalized if item.get("url") and item.get("title")]
+    return _dedupe_results(normalized)
+
+
+def _llm_summarize_section(heading: str, results: List[dict]) -> str:
+    if not results:
+        return "- 暂无可靠公开信息，可稍后刷新查看"
+
+    context_lines = []
+    for idx, item in enumerate(results[:AGENT_REPORT_SOURCE_LIMIT], start=1):
+        title = item.get("title") or "未命名"
+        snippet = item.get("snippet") or ""
+        source = item.get("source") or "未知来源"
+        published = item.get("publishedAt") or "未知日期"
+        url = item.get("url") or ""
+        context_lines.append(
+            f"{idx}. 标题：{title}\n摘要：{snippet}\n来源：{source}\n发布时间：{published}\n链接：{url}"
+        )
+
+    prompt = (
+        f"请根据下面的检索结果，生成《{heading}》简报。\n"
+        "要求：\n"
+        "1) 用中文输出；\n"
+        "2) 3-5条要点，使用项目符号；\n"
+        "3) 总字数控制在120-220字；\n"
+        "4) 不要捏造事实，不要编造来源；\n"
+        "5) 不要包含链接或引用格式。\n\n"
+        "检索结果：\n"
+        + "\n\n".join(context_lines)
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": "你是企业情报助手，输出精炼、结构化的中文要点。",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        resp = llm.chat(
+            messages,
+            temperature=0.3,
+            top_p=0.8,
+            max_tokens=500,
+            model=AGENT_REPORT_SUMMARY_MODEL,
+            timeout=60,
+        )
+        data = resp.json() if hasattr(resp, "json") else {}
+        content = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
+        if content:
+            return content
+    except Exception:
+        pass
+
+    fallback_lines = [f"- {item.get('title')}" for item in results[:3] if item.get("title")]
+    return "\n".join(fallback_lines) or "- 暂无可靠公开信息，可稍后刷新查看"
+
+
+def _build_dynamic_sections() -> Tuple[str, List[Dict[str, Any]]]:
+    generated_at = _to_iso(datetime.now(timezone.utc)) or _FALLBACK_GENERATED_AT
+    sections: List[Dict[str, Any]] = []
+
+    for section in SECTION_CONFIGS:
+        try:
+            results = _call_tavily_search(
+                section["query"],
+                max_results=AGENT_REPORT_SEARCH_MAX_RESULTS,
+            )
+        except Exception as exc:
+            print(f"⚠️ Tavily 搜索失败 [{section['title']}]: {exc}")
+            results = []
+        summary = _llm_summarize_section(section["heading"], results)
+        content = f"## {section['heading']}\n\n{summary}"
+
+        sources = []
+        for item in results[:AGENT_REPORT_SOURCE_LIMIT]:
+            sources.append(
+                {
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "source": item.get("source"),
+                    "publishedAt": item.get("publishedAt"),
+                }
+            )
+
+        sections.append(
+            {
+                "id": section["id"],
+                "title": section["title"],
+                "icon": section["icon"],
+                "content": content,
+                "priority": section["priority"],
+                "updatedAt": generated_at,
+                "sources": sources,
+            }
+        )
+
+    sections.sort(key=lambda s: (s.get("priority", 99), s.get("id", 0)))
+    return generated_at, sections
+
+
+def _get_cached_or_refresh(force_refresh: bool) -> Tuple[str, List[Dict[str, Any]], str]:
+    today = _today_key()
+    if not force_refresh:
+        with REPORT_CACHE_LOCK:
+            cached_date = REPORT_CACHE_STATE.get("date")
+            cached_payload = REPORT_CACHE_STATE.get("payload")
+            if cached_payload and cached_date == today:
+                return cached_payload["generatedAt"], cached_payload["sections"], "cache"
+
+        cached_db = _fetch_cached_report(today)
+        if cached_db:
+            generated_at, sections = cached_db
+            payload = {"generatedAt": generated_at, "sections": sections}
+            with REPORT_CACHE_LOCK:
+                REPORT_CACHE_STATE["date"] = today
+                REPORT_CACHE_STATE["payload"] = payload
+            return generated_at, sections, "cache-db"
+
+    try:
+        generated_at, sections = _build_dynamic_sections()
+    except Exception as exc:
+        print(f"⚠️ 生成动态日报失败，回退缓存: {exc}")
+        with REPORT_CACHE_LOCK:
+            cached_payload = REPORT_CACHE_STATE.get("payload")
+        if cached_payload:
+            return cached_payload["generatedAt"], cached_payload["sections"], "cache-stale"
+        cached_db = _fetch_cached_report(today)
+        if cached_db:
+            return cached_db[0], cached_db[1], "cache-stale"
+        cached_latest = _fetch_latest_cached_report()
+        if cached_latest:
+            return cached_latest[0], cached_latest[1], "cache-stale"
+        raise
+
+    payload = {"generatedAt": generated_at, "sections": sections}
+    with REPORT_CACHE_LOCK:
+        REPORT_CACHE_STATE["date"] = today
+        REPORT_CACHE_STATE["payload"] = payload
+    _save_cached_report(today, generated_at, sections, "tavily")
+    return generated_at, sections, "tavily"
+
+
 def _fetch_from_supabase(limit: int) -> Tuple[str, List[Dict[str, Any]]]:
     if not _supabase:
         raise RuntimeError("Supabase client not available")
@@ -162,6 +524,7 @@ def _fetch_from_supabase(limit: int) -> Tuple[str, List[Dict[str, Any]]]:
                 "content": str(content),
                 "priority": priority_int,
                 "updatedAt": formatted_updated or _FALLBACK_GENERATED_AT,
+                "sources": row.get("sources") if isinstance(row.get("sources"), list) else [],
             }
         )
 
@@ -191,12 +554,34 @@ def _fallback_report() -> Tuple[str, List[Dict[str, Any]]]:
 
 @agent_report_bp.route("/initial-report", methods=["GET"])
 def get_agent_initial_report():
+    force_refresh = False
     try:
-        generated_at, sections = _fetch_from_supabase(AGENT_REPORT_LIMIT)
-        source = "remote"
+        from flask import request
+
+        force_refresh = request.args.get("refresh") == "1"
     except Exception:
-        generated_at, sections = _fallback_report()
-        source = "fallback"
+        force_refresh = False
+
+    tavily_key = _get_tavily_key()
+    if not tavily_key:
+        print("[WARN] TAVILY_API_KEY missing; Tavily fetch disabled")
+    if tavily_key:
+        try:
+            generated_at, sections, source = _get_cached_or_refresh(force_refresh)
+        except Exception:
+            try:
+                generated_at, sections = _fetch_from_supabase(AGENT_REPORT_LIMIT)
+                source = "remote"
+            except Exception:
+                generated_at, sections = _fallback_report()
+                source = "fallback"
+    else:
+        try:
+            generated_at, sections = _fetch_from_supabase(AGENT_REPORT_LIMIT)
+            source = "remote"
+        except Exception:
+            generated_at, sections = _fallback_report()
+            source = "fallback"
 
     payload = {
         "code": 200,
@@ -207,6 +592,11 @@ def get_agent_initial_report():
         },
         "source": source,
     }
+
+    try:
+        print(f"[INFO] agent initial report source={source} generatedAt={generated_at}")
+    except Exception:
+        pass
 
     response = make_response(json.dumps(payload, ensure_ascii=False, indent=2))
     response.status_code = 200

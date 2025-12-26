@@ -83,6 +83,7 @@ README.md                   # 项目说明文档
 | `NEWS_FEED_TABLE` | `fact_events` | 新闻接口使用的 Supabase 表名（兼容旧的 `NEWS_FEED_VIEW` 配置） |
 | `AGENT_REPORT_SOURCE` | `agent_initial_report_view` | 智能体报告数据源视图 |
 | `AGENT_REPORT_LIMIT` | `12` | 智能体报告返回条目数上限 |
+| `AGENT_REPORT_CACHE_TABLE` | `agent_daily_report_cache` | 智能体初始报告缓存表 |
 | `DATABOARD_NEWS_TABLE` | `00_news` | 数据模块新闻表名 |
 | `DATABOARD_COMPETITOR_NEWS_TABLE` | `00_competitors_news` | 数据模块竞品新闻表名 |
 | `DATABOARD_COMPETITORS_TABLE` | `00_competitors` | 数据模块竞品公司表名 |
@@ -91,6 +92,11 @@ README.md                   # 项目说明文档
 | `DATABOARD_NEWS_MONTHS` | `12` | 新闻趋势默认月份数 |
 | `DATABOARD_TREND_MONTHS` | `6` | 竞品/研究趋势月份数 |
 | `MAP_FACT_TABLE` | `fact_events` | 地图模块事实表名（可通过环境变量覆盖） |
+| `USE_WEB_SEARCH` | `true` | 聊天是否启用联网搜索 |
+| `WEB_SEARCH_TOPK` | `6` | 联网搜索返回条数 |
+| `WEB_SEARCH_CACHE_MINUTES` | `30` | 联网搜索缓存分钟数 |
+| `WEB_SEARCH_MIN_SCORE` | `0` | 联网搜索最低分过滤 |
+| `WEB_SEARCH_CACHE_TABLE` | `agent_web_search_cache` | 联网搜索缓存表 |
 
 > 代码中保留了演示用的 Supabase 默认地址/密钥，请在实际部署前覆盖为自己的项目配置。
 
@@ -103,11 +109,19 @@ DAILY_REPORT_DEFAULT_VIEW=management
 NEWS_FEED_TABLE=fact_events
 AGENT_REPORT_SOURCE=agent_initial_report_view
 AGENT_REPORT_LIMIT=12
+AGENT_REPORT_CACHE_TABLE=agent_daily_report_cache
 DATABOARD_NEWS_TABLE=00_news
 DATABOARD_COMPETITOR_NEWS_TABLE=00_competitors_news
 DATABOARD_COMPETITORS_TABLE=00_competitors
 DATABOARD_PAPERS_TABLE=00_papers
 DATABOARD_OPPORTUNITY_TABLE=00_opportunity
+DATABOARD_NEWS_MONTHS=12
+DATABOARD_TREND_MONTHS=6
+USE_WEB_SEARCH=true
+WEB_SEARCH_TOPK=6
+WEB_SEARCH_CACHE_MINUTES=30
+WEB_SEARCH_MIN_SCORE=0
+WEB_SEARCH_CACHE_TABLE=agent_web_search_cache
 ```
 
 ## API Surface
@@ -140,6 +154,14 @@ DATABOARD_OPPORTUNITY_TABLE=00_opportunity
 - `backend_api/agent-report-api.md` - 智能体报告接口文档
 - `backend_api/databoard-map-api.md` - 地图模块接口文档
 - `backend_api/databoard-data-api.md` - 数据模块接口文档
+
+## Cache Tables (Optional)
+
+如需启用智能体初始报告与联网搜索缓存（跨进程持久化），请在 Supabase 执行：
+
+```
+backend/backend_api/agent_cache_tables.sql
+```
 
 ### API Examples
 ```bash

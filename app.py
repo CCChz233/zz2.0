@@ -18,6 +18,49 @@ from flask_cors import CORS
 # 确保可以导入项目根目录下的 infra 包
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+def _load_env_file(path: str) -> list[str]:
+    if not os.path.isfile(path):
+        return []
+    loaded_keys = []
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+                loaded_keys.append(key)
+    return loaded_keys
+
+
+def _load_env() -> None:
+    base_dir = os.path.dirname(__file__)
+    root_dir = os.path.abspath(os.path.join(base_dir, ".."))
+    env_paths = [
+        os.path.join(base_dir, ".env"),
+        os.path.join(root_dir, ".env"),
+    ]
+    for path in env_paths:
+        loaded = _load_env_file(path)
+        if os.path.isfile(path):
+            if loaded:
+                print(f"[INFO] loaded env file: {path} ({len(loaded)} keys)")
+            else:
+                print(f"[INFO] env file present but no new keys loaded: {path}")
+
+
+_load_env()
+
+if os.getenv("TAVILY_API_KEY"):
+    print("[INFO] TAVILY_API_KEY detected")
+else:
+    print("[WARN] TAVILY_API_KEY not set")
+
 # 导入各个Blueprint
 from backend_api.daily_report_bp import daily_report_bp
 from backend_api.data_cards_bp import data_cards_bp
