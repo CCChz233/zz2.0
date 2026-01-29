@@ -18,6 +18,7 @@
 import os
 import json
 import uuid
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -52,6 +53,10 @@ AUTO_ROUTE_TASKS = os.getenv("AUTO_ROUTE_TASKS", "true").lower() == "true"  # �
 
 # DeepAnalyze 配置
 USE_DEEPANALYZE = os.getenv("USE_DEEPANALYZE", "true").lower() == "true"
+
+# 🔥 新增：MCP配置（增量功能，默认关闭）
+USE_MCP_SEARCH = os.getenv("USE_MCP_SEARCH", "false").lower() == "true"  # 是否启用MCP搜索
+USE_MCP_MANAGER = os.getenv("USE_MCP_MANAGER", "false").lower() == "true"  # 是否启用MCP管理器
 
 # 聊天记录表名（需要在Supabase中创建）
 CHAT_SESSIONS_TABLE = os.getenv("CHAT_SESSIONS_TABLE", "chat_sessions")
@@ -93,6 +98,7 @@ USE_WEB_SEARCH = os.getenv("USE_WEB_SEARCH", "true").lower() == "true"
 WEB_SEARCH_TOPK = _get_env_int("WEB_SEARCH_TOPK", 6)
 WEB_SEARCH_CACHE_MINUTES = _get_env_int("WEB_SEARCH_CACHE_MINUTES", 30)
 WEB_SEARCH_MIN_SCORE = _get_env_float("WEB_SEARCH_MIN_SCORE", 0.0)
+QUOTE_TEXT_LIMIT = _get_env_int("QUOTE_TEXT_LIMIT", 800)
 
 
 def _to_iso(dt: Optional[datetime]) -> str:
@@ -108,6 +114,46 @@ def _contains_keyword(text: str, keywords: List[str]) -> bool:
     if not text:
         return False
     return any(keyword in text for keyword in keywords)
+
+
+def _trim_query_text(text: str, limit: int = 80) -> str:
+    clean = " ".join((text or "").split())
+    if len(clean) > limit:
+        return f"{clean[:limit]}..."
+    return clean
+
+
+def _extract_last_user_message(conversation_history: List[Dict[str, str]]) -> str:
+    if not conversation_history:
+        return ""
+    for item in reversed(conversation_history):
+        if item.get("role") != "user":
+            continue
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        if "\n\n" in content:
+            # 引用格式通常是“引用内容\n\n用户问题”，取用户问题部分
+            content = content.split("\n\n")[-1].strip()
+        if len(content) > 120:
+            content = content[:120]
+        return content
+    return ""
+
+
+def _should_expand_retrieval_query(text: str) -> bool:
+    content = (text or "").strip()
+    if not content:
+        return False
+    if "\n\n" in content:
+        return False
+    if len(content) <= 8:
+        return True
+    if re.fullmatch(r"(介绍一下|介绍下|讲一下|讲下|说明一下|科普一下|简单介绍|概述一下|是什么|是啥|什么意思|这是什么|这是什么\?)", content):
+        return True
+    if re.search(r"(这|那|它|此|该)(个|些|种|类|东西|项目|产品|学校|公司)?(是什么|是啥|指什么|什么意思|介绍|概述|说明|背景|简介)", content):
+        return True
+    return False
 
 
 def _build_sources_payload(evidence: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -156,6 +202,97 @@ def _build_sources_payload(evidence: List[Dict[str, Any]]) -> Dict[str, List[Dic
     return grouped
 
 
+def _pop_quote_option(options: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    if not isinstance(options, dict):
+        return None
+    raw = options.pop("quote", None)
+    if raw is None:
+        print(f"📝 [引用] options 中没有 quote 字段")
+        return None
+    print(f"📝 [引用] 从 options 提取 quote，原始类型: {type(raw)}, 内容: {str(raw)[:200]}...")
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return None
+        result = {"text": text, "title": "引用内容", "source": ""}
+        print(f"📝 [引用] 解析引用（字符串）: {result}")
+        return result
+    if isinstance(raw, dict):
+        text = str(raw.get("text") or "").strip()
+        if not text:
+            print(f"📝 [引用] 引用文本为空，忽略")
+            return None
+        title = str(raw.get("title") or "引用内容").strip()
+        source = str(raw.get("source") or raw.get("role") or "").strip()
+        result = {"text": text, "title": title, "source": source}
+        print(f"📝 [引用] 解析引用（字典）: {result}")
+        return result
+    print(f"📝 [引用] quote 格式不支持: {type(raw)}")
+    return None
+
+
+def _build_quoted_message(user_message: str, quote: Optional[Dict[str, str]]) -> str:
+    if not quote:
+        return user_message
+    text = str(quote.get("text") or "").strip()
+    if not text:
+        return user_message
+    if len(text) > QUOTE_TEXT_LIMIT:
+        text = f"{text[:QUOTE_TEXT_LIMIT]}..."
+    result = f"{text}\n\n{user_message}"
+    print(f"📝 [引用] 构建带引用的消息:\n引用内容: {text[:100]}...\n用户消息: {user_message[:100]}...\n组合结果: {result[:200]}...")
+    return result
+
+
+def _apply_quote_to_messages(messages: List[Dict[str, str]], quoted_message: str, original_message: str) -> List[Dict[str, str]]:
+    if quoted_message == original_message:
+        return messages
+    for idx in range(len(messages) - 1, -1, -1):
+        if messages[idx].get("role") == "user":
+            original_content = messages[idx]["content"]
+            messages[idx]["content"] = quoted_message
+            print(f"📝 [引用] 应用引用到消息 #{idx}:\n原始内容: {original_content[:100]}...\n修改后: {quoted_message[:200]}...")
+            break
+    return messages
+
+
+# 🔥 新增：MCP搜索函数（增量功能）
+async def _call_mcp_search(
+    query: str,
+    web_enabled: bool = True,
+    db_enabled: bool = True
+) -> str:
+    """
+    调用MCP搜索（增量功能，可选启用）
+
+    注意：MCP内部还是调用现有的 search_web 和 run_semantic_retrieval
+    这里只是提供一个统一的MCP接口层
+    """
+    if not USE_MCP_SEARCH:
+        return ""
+
+    try:
+        # 导入MCP适配器
+        from backend_api.mcp_adapters.search_mcp import app as search_mcp_app
+
+        # 调用MCP搜索工具
+        result = await search_mcp_app.call_tool(
+            name="search_all",
+            arguments={
+                "query": query,
+                "web_enabled": web_enabled,
+                "db_enabled": db_enabled
+            }
+        )
+
+        # 返回格式化的搜索结果
+        return result[0].text if result else ""
+
+    except Exception as e:
+        print(f"⚠️ MCP搜索调用失败: {e}")
+        return ""  # 失败时返回空字符串，不影响后续流程
+
+
 def _build_retrieval_messages(
     user_message: str,
     system_prompt: str,
@@ -163,6 +300,14 @@ def _build_retrieval_messages(
     use_rag: bool,
     use_web_search: bool,
 ) -> Dict[str, object]:
+    retrieval_query = user_message
+    if _should_expand_retrieval_query(user_message):
+        last_user_message = _extract_last_user_message(conversation_history)
+        if last_user_message and last_user_message not in user_message:
+            # 短问句优先用上一条用户消息做检索，避免“这是什么”被当成主语义
+            retrieval_query = last_user_message
+            print(f"🔍 [检索] 使用上一条用户消息增强检索: {_trim_query_text(retrieval_query, 120)}")
+
     rag_triggered = bool(use_rag) or _contains_keyword(user_message, RAG_KEYWORDS)
     web_triggered = bool(use_web_search) or _contains_keyword(user_message, WEB_SEARCH_KEYWORDS)
     combined_triggered = rag_triggered or web_triggered
@@ -174,7 +319,7 @@ def _build_retrieval_messages(
     if combined_triggered:
         try:
             rag_results = run_semantic_retrieval(
-                user_message,
+                retrieval_query,
                 k=_get_env_int("RAG_TOPK", 8),
                 min_sim=_get_env_float("RAG_MIN_SIM", 0.4),
             )
@@ -184,7 +329,7 @@ def _build_retrieval_messages(
         if USE_WEB_SEARCH:
             try:
                 web_results = search_web(
-                    user_message,
+                    retrieval_query,
                     max_results=WEB_SEARCH_TOPK,
                     min_score=WEB_SEARCH_MIN_SCORE,
                     cache_ttl_seconds=WEB_SEARCH_CACHE_MINUTES * 60,
@@ -229,20 +374,50 @@ def _build_retrieval_messages(
 
     evidence_blocks: List[str] = []
     if rag_results:
-        evidence_blocks.append(f"【本地知识库】\n{build_evidence_block(rag_results)}")
+        evidence_blocks.append(f"【本地知识库】\n{build_evidence_block(rag_results, start_index=1)}")
     if web_results:
-        evidence_blocks.append(build_web_evidence_block(web_results))
+        evidence_blocks.append(build_web_evidence_block(web_results, start_index=len(rag_results) + 1))
 
     messages: List[Dict[str, str]] = []
+
+    # 🔍 调试：打印用户消息，检查是否有引用
+    print(f"🔍 [DEBUG] 用户消息长度: {len(user_message)}, 内容预览: {user_message[:200]}...")
+    if "\n\n" in user_message:
+        parts = user_message.split("\n\n")
+        print(f"🔍 [DEBUG] 检测到 \\n\\n 分隔符，分成 {len(parts)} 部分")
+        for i, part in enumerate(parts):
+            print(f"🔍 [DEBUG]   部分 {i+1}: 长度={len(part)}, 预览={part[:100]}...")
+
     if evidence_blocks:
         system_content = system_prompt or "你是一个有帮助的助手。"
-        system_content = (
-            f"{system_content}\n\n"
-            "请优先使用【本地知识库】证据回答，必要时再引用【网络搜索】；"
-            "不要在正文中输出来源列表，来源由系统统一追加。"
-            "若证据不足，请直接说明信息不足，不要编造。\n"
-            + "\n\n".join(evidence_blocks)
-        )
+
+        # 检测用户消息是否包含引用（引用格式通常是"引用内容\n\n用户问题"）
+        has_quote = "\n\n" in user_message and len(user_message.split("\n\n")[0]) > 50
+
+        if has_quote:
+            # 当有引用时，告诉 AI 优先使用引用内容回答，而不是 RAG 证据
+            quoted_part = user_message.split("\n\n")[0]
+            system_content = (
+                f"{system_content}\n\n"
+                f"【用户引用了以下内容，请优先基于引用内容回答问题】\n"
+                f"{quoted_part[:200]}...\n\n"
+                f"以下是系统检索到的相关参考资料（仅供参考，引用内容优先级更高）：\n"
+                "请优先使用【本地知识库】证据回答，必要时再引用【网络搜索】；"
+                "引用证据时请使用[[编号]]标注，编号与证据列表序号一致；"
+                "不要在正文中输出来源列表，来源由系统统一追加。"
+                "若证据不足，请直接说明信息不足，不要编造。\n"
+                + "\n\n".join(evidence_blocks)
+            )
+            print(f"📝 [引用] 检测到引用内容，在 system prompt 中添加优先级指示")
+        else:
+            system_content = (
+                f"{system_content}\n\n"
+                "请优先使用【本地知识库】证据回答，必要时再引用【网络搜索】；"
+                "引用证据时请使用[[编号]]标注，编号与证据列表序号一致；"
+                "不要在正文中输出来源列表，来源由系统统一追加。"
+                "若证据不足，请直接说明信息不足，不要编造。\n"
+                + "\n\n".join(evidence_blocks)
+            )
         messages = [{"role": "system", "content": system_content}]
         messages.extend(conversation_history)
         messages.append({"role": "user", "content": user_message})
@@ -460,15 +635,17 @@ def chat():
         # 合并默认选项
         default_options = get_default_options()
         options = {**default_options, **options}
+        quote_payload = _pop_quote_option(options)
+        quoted_user_message = _build_quoted_message(user_message, quote_payload)
         
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
-        
+
         # 构建消息列表（本地 RAG + 联网搜索）
         use_rag = data.get("use_rag", False)
         use_web_search = data.get("use_web_search", False)
         retrieval = _build_retrieval_messages(
-            user_message=user_message,
+            user_message=quoted_user_message,
             system_prompt=system_prompt,
             conversation_history=conversation_history,
             use_rag=use_rag,
@@ -477,12 +654,13 @@ def chat():
         messages = retrieval["messages"]
         used_evidence = retrieval["used_evidence"]
         sources_payload = retrieval["sources"]
+        messages = _apply_quote_to_messages(messages, quoted_user_message, user_message)
         
         # 先创建或更新会话（确保会话存在）
         _create_or_update_session(session_id)
         
         # 保存用户消息
-        _save_message(session_id, "user", user_message)
+        _save_message(session_id, "user", quoted_user_message)
         
         # 获取任务类型（从前端传递或自动检测）
         task_type = data.get("task_type", "auto")
@@ -500,9 +678,14 @@ def chat():
             print(f"🎯 [任务控制] 前端指定使用 Qwen（聊天任务）")
         else:
             print(f"🎯 [任务控制] 使用自动路由（task_type: {task_type}）")
-        
+
+        # 检查是否有引用，如果有则标记使用 chat 端点
+        if quote_payload and force_provider == 'gpt-researcher':
+            options['_use_chat_endpoint'] = True
+            print(f"📝 [引用] 非流式：检测到引用，强制使用 /api/chat 端点")
+
         # 调用 LLM API（根据 task_type 选择服务）
-        response = _call_llm_api(messages, user_message=user_message, stream=False, force_provider=force_provider, **options)
+        response = _call_llm_api(messages, user_message=quoted_user_message, stream=False, force_provider=force_provider, **options)
         result = response.json()
         
         # 提取AI回复
@@ -534,7 +717,7 @@ def chat():
                 "evidence": used_evidence,  # NEW: 返回证据
                 "sources": sources_payload,
                 "conversation_history": conversation_history + [
-                    {"role": "user", "content": user_message},
+                    {"role": "user", "content": quoted_user_message},
                     {"role": "assistant", "content": ai_content}
                 ]
             }
@@ -568,33 +751,49 @@ def chat_stream():
         conversation_history = data.get("conversation_history", [])
         options = data.get("options", {})
         task_type = data.get("task_type", "auto")  # 任务类型：'research' 强制使用 GPT-Researcher, 'chat' 使用 Qwen, 'auto' 自动路由
-        
+
+        # 🔥 新增：MCP搜索选项（增量功能）
+        use_mcp_search = data.get("use_mcp_search", False) and USE_MCP_SEARCH
+
         # 合并默认选项
         default_options = get_default_options()
         options = {**default_options, **options}
-        
+        quote_payload = _pop_quote_option(options)
+        quoted_user_message = _build_quoted_message(user_message, quote_payload)
+
         if not user_message:
             return jsonify({"code": 400, "message": "消息内容不能为空", "data": None}), 400
-        
+
         # 构建消息列表（本地 RAG + 联网搜索）
         use_rag = data.get("use_rag", False)
         use_web_search = data.get("use_web_search", False)
-        retrieval = _build_retrieval_messages(
-            user_message=user_message,
-            system_prompt=system_prompt,
-            conversation_history=conversation_history,
-            use_rag=use_rag,
-            use_web_search=use_web_search,
-        )
-        messages = retrieval["messages"]
-        used_evidence = retrieval["used_evidence"]
+
+        # 🔥 新增：MCP搜索路径（可选）
+        if use_mcp_search:
+            print("🔌 [MCP模式] 使用MCP统一搜索")
+            # 注意：这里需要在async上下文中调用，所以我们稍后在generate()函数中处理
+            messages = []
+            used_evidence = []
+        else:
+            # 传统路径（默认，完全不变）
+            retrieval = _build_retrieval_messages(
+                user_message=quoted_user_message,
+                system_prompt=system_prompt,
+                conversation_history=conversation_history,
+                use_rag=use_rag,
+                use_web_search=use_web_search,
+            )
+            messages = retrieval["messages"]
+            used_evidence = retrieval["used_evidence"]
+
+        messages = _apply_quote_to_messages(messages, quoted_user_message, user_message)
         
         # 先创建或更新会话（确保会话存在）
         _create_or_update_session(session_id)
         
         # 保存用户消息
         user_message_id = str(uuid.uuid4())
-        _save_message(session_id, "user", user_message, user_message_id)
+        _save_message(session_id, "user", quoted_user_message, user_message_id)
         
         def generate():
             """生成流式响应"""
@@ -621,17 +820,17 @@ def chat_stream():
                     # 前端明确指定使用 Qwen
                     force_provider = 'qwen'
                     print(f"🎯 [任务控制] 前端指定使用 Qwen（聊天任务）")
-                elif AUTO_ROUTE_TASKS and (USE_GPT_RESEARCHER or USE_DEEPANALYZE) and user_message:
+                elif AUTO_ROUTE_TASKS and (USE_GPT_RESEARCHER or USE_DEEPANALYZE) and quoted_user_message:
                     # 自动路由
-                    detected_task_type = detect_task_type(user_message)
+                    detected_task_type = detect_task_type(quoted_user_message)
                     if detected_task_type == 'research' and USE_GPT_RESEARCHER:
                         use_gpt_researcher = True
                         print(f"🔍 [任务路由] 自动检测到研究任务，路由到 GPT-Researcher")
-                        print(f"   用户消息: {user_message[:50]}...")
+                        print(f"   用户消息: {quoted_user_message[:50]}...")
                     elif detected_task_type == 'data' and USE_DEEPANALYZE:
                         use_deepanalyze = True
                         print(f"🔍 [任务路由] 自动检测到数据分析任务，路由到 DeepAnalyze")
-                        print(f"   用户消息: {user_message[:50]}...")
+                        print(f"   用户消息: {quoted_user_message[:50]}...")
                     else:
                         print(f"🔍 [任务路由] 自动检测到{detected_task_type}任务，使用默认服务 (Qwen)")
                 else:
@@ -639,7 +838,47 @@ def chat_stream():
                         print(f"🔍 [任务路由] 自动路由已禁用，使用默认服务")
                     elif not USE_GPT_RESEARCHER and not USE_DEEPANALYZE:
                         print(f"🔍 [任务路由] GPT-Researcher 和 DeepAnalyze 已禁用，使用默认服务")
-                
+
+                # 🔥 新增：MCP搜索处理（在发送初始事件前）
+                if use_mcp_search:
+                    # 调用MCP搜索（异步）
+                    import asyncio
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+
+                    mcp_search_result = loop.run_until_complete(
+                        _call_mcp_search(
+                            query=quoted_user_message,
+                            web_enabled=use_web_search,
+                            db_enabled=use_rag
+                        )
+                    )
+
+                    # 如果MCP搜索有结果，构建消息
+                    if mcp_search_result:
+                        # 构建包含搜索结果的消息
+                        search_system_content = system_prompt or "你是一个有帮助的助手。"
+                        search_system_content = f"{search_system_content}\n\n{mcp_search_result}"
+
+                        messages = [
+                            {"role": "system", "content": search_system_content},
+                            *conversation_history,
+                            {"role": "user", "content": quoted_user_message}
+                        ]
+                        print(f"✅ [MCP搜索] 已获取搜索结果并构建消息")
+                    else:
+                        # MCP搜索失败，回退到传统方式
+                        print("⚠️ [MCP搜索] 未获取到结果，回退到传统方式")
+                        retrieval = _build_retrieval_messages(
+                            user_message=quoted_user_message,
+                            system_prompt=system_prompt,
+                            conversation_history=conversation_history,
+                            use_rag=use_rag,
+                            use_web_search=use_web_search,
+                        )
+                        messages = retrieval["messages"]
+                        used_evidence = retrieval["used_evidence"]
+
                 # 发送初始事件
                 yield f"data: {json.dumps({'type': 'start', 'session_id': session_id}, ensure_ascii=False)}\n\n"
                 # NEW: 推送证据事件（空列表也发送，方便前端处理）
@@ -651,6 +890,15 @@ def chat_stream():
                 if use_gpt_researcher:
                     # 使用 GPT-Researcher（支持进度显示）
                     print(f"🚀 [GPT-Researcher] 开始调用研究服务...")
+
+                    # 检查是否有引用，如果有引用则使用 /api/chat 端点而不是 /report/ 端点
+                    # 因为 /api/chat 端点可以传递完整的消息上下文（包括引用内容）
+                    has_quote = quote_payload is not None
+                    if has_quote:
+                        print(f"📝 [GPT-Researcher] 检测到引用，使用 /api/chat 端点以保留完整上下文")
+                        # 临时标记，告诉适配器使用 chat 端点
+                        options['_use_chat_endpoint'] = True
+
                     adapter = get_gpt_researcher_adapter()
                     
                     # 定义进度回调函数（用于发送进度到前端）
@@ -710,7 +958,7 @@ def chat_stream():
                     print(f"✅ [DeepAnalyze] 完成，共发送 {chunk_count} 个chunks，总长度: {len(ai_content)} 字符")
                 else:
                     # 使用 Qwen API（真正的流式）
-                    response = _call_llm_api(messages, user_message=user_message, stream=True, force_provider=force_provider, **options)
+                    response = _call_llm_api(messages, user_message=quoted_user_message, stream=True, force_provider=force_provider, **options)
                     
                     # 处理流式响应
                     for line in response.iter_lines():

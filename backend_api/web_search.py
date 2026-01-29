@@ -241,11 +241,11 @@ def search_web(
     return normalized
 
 
-def build_web_evidence_block(results: List[Dict[str, object]]) -> str:
+def build_web_evidence_block(results: List[Dict[str, object]], start_index: int = 1) -> str:
     if not results:
         return ""
     lines = ["【网络搜索】"]
-    for idx, item in enumerate(results, start=1):
+    for idx, item in enumerate(results, start=start_index):
         title = item.get("title") or "未提供标题"
         url = item.get("url") or ""
         snippet = item.get("snippet") or ""

@@ -118,10 +118,12 @@ class GPTResearcherAdapter:
             if msg.get("role") == "user":
                 user_message = msg.get("content", "")
                 break
-        
+
         # 如果没有找到用户消息，使用第一条消息的内容
         if not user_message and messages:
             user_message = messages[-1].get("content", "")
+
+        logger.info(f"📝 [GPT-Researcher] 提取的用户消息:\n{user_message[:300]}...")
         
         # 规范化 tone 参数（转换为枚举名称）
         normalized_tone = self._normalize_tone(tone)
@@ -318,7 +320,7 @@ class GPTResearcherAdapter:
     ) -> Dict[str, Any]:
         """
         调用 GPT-Researcher API，返回 OpenAI 兼容格式
-        
+
         Args:
             messages: OpenAI 格式的消息列表
             model: 模型名称（用于响应格式）
@@ -326,12 +328,18 @@ class GPTResearcherAdapter:
             use_report_endpoint: 是否使用 /report/ 端点生成完整研究报告（默认 True）
             report_type: 报告类型，"research_report"（快速）或 "detailed_report"（详细）
             tone: 报告语调，"informative", "analytical", "casual" 等
-            **options: 其他选项
-        
+            **options: 其他选项，包括 _use_chat_endpoint 标记
+
         Returns:
             OpenAI 兼容格式的响应
         """
         try:
+            # 检查是否有强制使用 chat 端点的标记（用于引用场景）
+            force_chat_endpoint = options.pop('_use_chat_endpoint', False)
+            if force_chat_endpoint:
+                logger.info("📝 [GPT-Researcher] 强制使用 /api/chat 端点（引用场景）")
+                use_report_endpoint = False
+
             if use_report_endpoint:
                 # 使用 /report/ 端点生成完整研究报告
                 request_data = self._convert_to_gpt_researcher_report_format(
@@ -406,20 +414,26 @@ class GPTResearcherAdapter:
     ) -> Iterator[Dict[str, Any]]:
         """
         流式调用 GPT-Researcher API（模拟流式）
-        
+
         注意：GPT-Researcher 当前不支持真正的流式响应，
         此方法会先获取完整响应，然后模拟流式输出
-        
+
         Args:
             messages: OpenAI 格式的消息列表
             model: 模型名称
             report: 研究报告内容（可选）
-            **options: 其他选项
-        
+            **options: 其他选项，包括 _use_chat_endpoint 标记
+
         Yields:
             OpenAI 兼容格式的流式响应块
         """
         try:
+            # 检查是否有强制使用 chat 端点的标记（用于引用场景）
+            force_chat_endpoint = options.pop('_use_chat_endpoint', False)
+            if force_chat_endpoint:
+                logger.info("📝 [GPT-Researcher] 流式：强制使用 /api/chat 端点（引用场景）")
+                use_report_endpoint = False
+
             # 如果提供了进度回调，尝试使用 WebSocket 获取实时进度
             if progress_callback and use_report_endpoint:
                 try:

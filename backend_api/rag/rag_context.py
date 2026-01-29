@@ -10,13 +10,13 @@ def _truncate(text: str, limit: int = SUMMARY_LIMIT) -> str:
     return text
 
 
-def build_evidence_block(items: List[Dict]) -> str:
+def build_evidence_block(items: List[Dict], start_index: int = 1) -> str:
     """Format retrieval results into an evidence string for prompting."""
     if not items:
         return "未检索到相关事件。若证据不足，请直接说明“当前事件库未查到足够信息”，不要编造。"
 
     lines: List[str] = ["以下为检索到的相关事件，请仅基于这些信息回答："]
-    for idx, item in enumerate(items, start=1):
+    for idx, item in enumerate(items, start=start_index):
         title = item.get("title") or "未提供标题"
         url = item.get("url") or ""
         summary = _truncate(item.get("summary", ""))
@@ -55,4 +55,3 @@ def build_messages_with_evidence(user_question: str, items: List[Dict]) -> List[
         {"role": "system", "content": system_content},
         {"role": "user", "content": user_question},
     ]
-

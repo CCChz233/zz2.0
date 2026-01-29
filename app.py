@@ -87,11 +87,29 @@ class CustomJSONEncoder(json.JSONEncoder):
 app.json_encoder = CustomJSONEncoder
 
 # 配置 CORS 解决跨域问题
-CORS(app, 
-        origins=['http://localhost:9528', 'http://127.0.0.1:9528', 'http://localhost:3000', 'http://127.0.0.1:3000', 'http://116.62.34.152:7002'],
-     methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'X-Token'],
-     supports_credentials=True)
+default_allowed_origins = [
+    'http://localhost:9528',
+    'http://127.0.0.1:9528',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://116.62.34.152:7002',
+    'https://116.62.34.152',
+]
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
+if allowed_origins_env:
+    allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+    if not allowed_origins:
+        allowed_origins = default_allowed_origins
+else:
+    allowed_origins = default_allowed_origins
+# 支持本地和线上 HTTPS 访问
+CORS(
+    app,
+    origins=allowed_origins,
+    methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allow_headers=['Content-Type', 'Authorization', 'X-Requested-With', 'X-Token'],
+    supports_credentials=True
+)
 
 # 注册Blueprint
 app.register_blueprint(daily_report_bp, url_prefix='/api/dashboard')

@@ -184,22 +184,27 @@ def _json_err(code: int, message: str, http_status: int = 400, data: Optional[di
 def _parse_date_arg(d: Optional[str]) -> date_cls:
     """
     解析日期参数。
-    如果未提供日期，返回数据库中最新的日期（带缓存，保证数据一致性），
-    而不是使用 UTC 的今天（避免因数据实时更新导致每次查询结果不同）。
+    - 未提供日期：返回数据库中最新的日期（带缓存，保证数据一致性），而不是 UTC 今天。
+    - 若提供的日期晚于数据库最新日期：自动回退到最新日期，避免前端使用当前时间导致统计窗口为空。
     
     使用缓存机制（5分钟TTL）减少数据库查询，同时保证短时间内的请求使用相同日期。
     """
+    latest_date = _get_latest_date_from_db()
     if not d:
-        # 使用缓存的最新日期，而不是每次都查询数据库
-        return _get_latest_date_from_db()
+        # 未传日期，直接用最新有数据的日期
+        return latest_date
     try:
-        return datetime.fromisoformat(d).date()
+        parsed = datetime.fromisoformat(d).date()
+        # 如果请求日期比最新数据日期还晚，回退到最新有数据的日期
+        if parsed > latest_date:
+            return latest_date
+        return parsed
     except Exception:
         # 40003: 日期格式错误
         raise ValueError("40003")
 
 def _window_from_timerange(anchor: date_cls, time_range: str) -> Tuple[datetime, datetime]:
-    """根据 timeRange 计算窗口 [start, end]（含端点）。"""
+    """根据 timeRange 计算窗口 [start, end]（含端点），使用滚动窗口而非整月/整季/整年。"""
     tr = time_range if time_range in VALID_TIMERANGE else "day"
 
     if tr == "day":
@@ -209,28 +214,14 @@ def _window_from_timerange(anchor: date_cls, time_range: str) -> Tuple[datetime,
         start = datetime.combine(anchor - timedelta(days=6), datetime.min.time())
         end = datetime.combine(anchor, datetime.max.time())
     elif tr == "month":
-        first = anchor.replace(day=1)
-        if first.month == 12:
-            next_first = first.replace(year=first.year + 1, month=1, day=1)
-        else:
-            next_first = first.replace(month=first.month + 1, day=1)
-        start = datetime.combine(first, datetime.min.time())
-        end = datetime.combine(next_first - timedelta(seconds=1), datetime.max.time())
+        start = datetime.combine(anchor - timedelta(days=29), datetime.min.time())  # 近30天
+        end = datetime.combine(anchor, datetime.max.time())
     elif tr == "quarter":
-        q = (anchor.month - 1) // 3  # 0..3
-        first_month = q * 3 + 1
-        first = anchor.replace(month=first_month, day=1)
-        if first_month == 10:
-            next_first = first.replace(year=first.year + 1, month=1, day=1)
-        else:
-            next_first = first.replace(month=first_month + 3, day=1)
-        start = datetime.combine(first, datetime.min.time())
-        end = datetime.combine(next_first - timedelta(seconds=1), datetime.max.time())
+        start = datetime.combine(anchor - timedelta(days=89), datetime.min.time())  # 近90天
+        end = datetime.combine(anchor, datetime.max.time())
     else:  # year
-        first = anchor.replace(month=1, day=1)
-        next_first = first.replace(year=first.year + 1, month=1, day=1)
-        start = datetime.combine(first, datetime.min.time())
-        end = datetime.combine(next_first - timedelta(seconds=1), datetime.max.time())
+        start = datetime.combine(anchor - timedelta(days=364), datetime.min.time())  # 近365天
+        end = datetime.combine(anchor, datetime.max.time())
     return start, end
 
 def _previous_window(start: datetime, end: datetime) -> Tuple[datetime, datetime]:
