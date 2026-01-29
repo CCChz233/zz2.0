@@ -797,6 +797,7 @@ def chat_stream():
         
         def generate():
             """生成流式响应"""
+            nonlocal messages, used_evidence
             ai_content = ""
             ai_message_id = str(uuid.uuid4())
             
